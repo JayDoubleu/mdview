@@ -518,22 +518,39 @@
     else syncFromPreview();
   }
 
-  const lineHeight = () => parseFloat(getComputedStyle($("#source")).lineHeight) || 20;
+  // Scroll sync maps preview offsets <-> source lines using the data-sourcepos
+  // attributes comrak emits. Block offsets are measured once and cached, so
+  // scrolling never forces a layout; the cache is dropped whenever the preview
+  // changes size (images loading, diagrams rendering, window resize...).
+  let anchors = null; // [{ top, height, start, end }] sorted by top
+  let lineH = 0;
   const sourcePad = 12;
-
-  function blockAt(y) {
-    // Last top-level block whose top is above y.
-    let best = null;
-    for (const n of preview.querySelectorAll(":scope > [data-sourcepos]")) {
-      const r = n.getBoundingClientRect();
-      if (r.top <= y) best = n; else break;
-    }
-    return best;
-  }
   const parsePos = (s) => {
     const m = /^(\d+):\d+-(\d+):\d+/.exec(s || "");
     return m ? [Number(m[1]), Number(m[2])] : null;
   };
+  function getAnchors() {
+    if (anchors) return anchors;
+    anchors = [];
+    for (const n of preview.children) {
+      const pos = parsePos(n.dataset.sourcepos);
+      if (pos) anchors.push({ top: n.offsetTop, height: n.offsetHeight, start: pos[0], end: pos[1] });
+    }
+    lineH = parseFloat(getComputedStyle($("#source")).lineHeight) || 20;
+    return anchors;
+  }
+  const invalidateAnchors = () => (anchors = null);
+  new ResizeObserver(invalidateAnchors).observe(preview);
+
+  // Index of the last anchor whose key is <= value (binary search).
+  function lastAtOrBefore(list, value, key) {
+    let lo = 0, hi = list.length - 1, found = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (list[mid][key] <= value) { found = mid; lo = mid + 1; } else hi = mid - 1;
+    }
+    return found;
+  }
 
   let driver = "preview";
   previewPane.addEventListener("mouseenter", () => (driver = "preview"));
@@ -543,41 +560,31 @@
 
   function syncFromPreview() {
     if (!S.showSource) return;
-    const top = previewPane.getBoundingClientRect().top;
-    if (previewPane.scrollTop <= 0) return void (sourcePane.scrollTop = 0);
-    const n = blockAt(top + 1);
-    const pos = n && parsePos(n.dataset.sourcepos);
-    if (!pos) return;
-    const r = n.getBoundingClientRect();
-    const frac = r.height > 0 ? Math.min(1, Math.max(0, (top - r.top) / r.height)) : 0;
-    const line = pos[0] + frac * (pos[1] - pos[0] + 1) - 1;
-    sourcePane.scrollTop = sourcePad + line * lineHeight();
+    const y = previewPane.scrollTop;
+    if (y <= 0) return void (sourcePane.scrollTop = 0);
+    const list = getAnchors();
+    const i = lastAtOrBefore(list, y, "top");
+    if (i < 0) return;
+    const a = list[i];
+    const frac = a.height > 0 ? Math.min(1, (y - a.top) / a.height) : 0;
+    const line = a.start + frac * (a.end - a.start + 1) - 1;
+    sourcePane.scrollTop = sourcePad + line * lineH;
   }
 
   function syncFromSource() {
-    const lh = lineHeight();
-    const line = (sourcePane.scrollTop - sourcePad) / lh + 1;
+    const list = getAnchors();
     if (sourcePane.scrollTop <= 0) return void (previewPane.scrollTop = 0);
-    const blocks = [...preview.querySelectorAll(":scope > [data-sourcepos]")];
-    let prev = null;
-    for (const n of blocks) {
-      const pos = parsePos(n.dataset.sourcepos);
-      if (!pos) continue;
-      if (pos[0] > line) break;
-      prev = { n, pos };
-    }
-    if (!prev) return;
-    const { n, pos } = prev;
-    const span = pos[1] - pos[0] + 1;
-    const frac = Math.min(1, Math.max(0, (line - pos[0]) / span));
-    const r = n.getBoundingClientRect();
-    const paneTop = previewPane.getBoundingClientRect().top;
-    previewPane.scrollTop += r.top - paneTop + frac * r.height;
+    const line = (sourcePane.scrollTop - sourcePad) / lineH + 1;
+    const i = lastAtOrBefore(list, line, "start");
+    if (i < 0) return;
+    const a = list[i];
+    const frac = Math.min(1, Math.max(0, (line - a.start) / (a.end - a.start + 1)));
+    previewPane.scrollTop = a.top + frac * a.height;
   }
 
   let raf = 0;
   previewPane.addEventListener("scroll", () => {
-    if (driver !== "preview" || raf) return;
+    if (!S.showSource || driver !== "preview" || raf) return;
     raf = requestAnimationFrame(() => { raf = 0; syncFromPreview(); });
   }, { passive: true });
   sourcePane.addEventListener("scroll", () => {

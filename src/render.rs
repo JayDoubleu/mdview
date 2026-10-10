@@ -91,8 +91,13 @@ pub fn markdown(src: &str) -> String {
     markdown_to_html_with_plugins(src, &opts, &plugins)
 }
 
-/// Highlights raw markdown source, returning HTML for the inside of a `<code>` element.
+/// Highlights raw markdown source, returning one `<span class="line">` per source line
+/// so every row has the same height as the line-number gutter.
 pub fn source(src: &str) -> String {
+    split_lines(&highlight_source(src))
+}
+
+fn highlight_source(src: &str) -> String {
     let e = engine();
     let syntax = e
         .syntaxes
@@ -109,6 +114,40 @@ pub fn source(src: &str) -> String {
         }
     }
     generator.finalize()
+}
+
+/// Wraps each line of highlighted HTML in its own element. Highlight spans can
+/// cross line breaks, so open spans are closed at the end of a line and
+/// reopened at the start of the next one.
+fn split_lines(html: &str) -> String {
+    let mut out = String::with_capacity(html.len() * 2);
+    let mut open: Vec<&str> = Vec::new();
+    let mut rest = html;
+    out.push_str("<span class=\"line\">");
+    while let Some(i) = rest.find(['<', '\n']) {
+        out.push_str(&rest[..i]);
+        rest = &rest[i..];
+        if rest.starts_with('\n') {
+            out.push_str(&"</span>".repeat(open.len()));
+            out.push_str("\n</span><span class=\"line\">");
+            open.iter().for_each(|tag| out.push_str(tag));
+            rest = &rest[1..];
+        } else {
+            let end = rest.find('>').map_or(rest.len(), |e| e + 1);
+            let tag = &rest[..end];
+            if tag.starts_with("</") {
+                open.pop();
+            } else {
+                open.push(tag);
+            }
+            out.push_str(tag);
+            rest = &rest[end..];
+        }
+    }
+    out.push_str(rest);
+    out.push_str(&"</span>".repeat(open.len()));
+    out.push_str("</span>");
+    out
 }
 
 pub fn html_escape(s: &str) -> String {
@@ -206,6 +245,22 @@ mod tests {
         let html = markdown("```mermaid\ngraph TD; A-->B\n```\n");
         assert!(html.contains("class=\"mermaid-src\""), "{html}");
         assert!(html.contains("A--&gt;B"), "{html}");
+    }
+
+    #[test]
+    fn source_lines_are_balanced() {
+        let html = split_lines("<span class=\"a\">x\ny</span>\nz");
+        assert_eq!(
+            html,
+            "<span class=\"line\"><span class=\"a\">x</span>\n</span>\
+             <span class=\"line\"><span class=\"a\">y</span>\n</span>\
+             <span class=\"line\">z</span>"
+        );
+        let src = "# a\n\n```rust\nfn x() {}\n```\n";
+        assert_eq!(
+            source(src).matches("class=\"line\"").count(),
+            src.lines().count() + 1
+        );
     }
 
     #[test]

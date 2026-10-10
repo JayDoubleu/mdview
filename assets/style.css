@@ -437,12 +437,15 @@ body.resizing iframe, body.resizing #preview-pane, body.resizing #source-pane { 
 @keyframes flash { from { background: var(--mark); } to { background: transparent; } }
 .markdown-body .flash { animation: flash 1.2s ease-out; }
 
-/* scrollbars */
-::-webkit-scrollbar { width: 12px; height: 12px; }
-::-webkit-scrollbar-thumb { background: var(--border); border-radius: 8px; border: 3px solid transparent; background-clip: content-box; }
-::-webkit-scrollbar-thumb:hover { background: var(--fg-subtle); background-clip: content-box; border: 3px solid transparent; }
-::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+/* Native scrollbars keep scrolling on the compositor's fast path; just tint them. */
+#preview-pane, #source-pane, .tree {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+  overscroll-behavior: contain;
+  will-change: scroll-position;
+}
 
 @media (max-width: 720px) {
   .markdown-body { padding: 20px 16px 64px; }
 }
+.source .code .line { display: block; height: calc(var(--line-h) * var(--zoom)); overflow: hidden; }
