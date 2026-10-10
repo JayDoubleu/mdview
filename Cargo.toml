@@ -1,0 +1,34 @@
+[package]
+name = "mdview"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A lightweight, cross-platform Markdown viewer with GitHub flavoured rendering, a file tree and a source pane"
+license = "MIT"
+repository = "https://github.com/JayDoubleu/mdview"
+readme = "README.md"
+keywords = ["markdown", "viewer", "gfm", "preview"]
+categories = ["text-processing", "gui"]
+exclude = ["/.github", "/docs"]
+
+[dependencies]
+comrak = { version = "0.56", default-features = false, features = ["syntect-fancy", "shortcodes"] }
+dirs = "6"
+dunce = "1"
+notify = "8"
+open = "5"
+percent-encoding = "2"
+serde_json = "1"
+syntect = { version = "5", default-features = false, features = ["default-fancy"] }
+tao = "0.37"
+wry = "0.57"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+muda = "0.21"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

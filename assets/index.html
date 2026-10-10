@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' mdview: http://mdview.localhost https://mdview.localhost; script-src 'self' mdview: http://mdview.localhost https://mdview.localhost; style-src 'self' 'unsafe-inline' mdview: http://mdview.localhost https://mdview.localhost; img-src * data: blob:; media-src * data: blob:; font-src 'self' data: mdview: http://mdview.localhost https://mdview.localhost; connect-src 'self' mdview: http://mdview.localhost https://mdview.localhost">
+<title>mdview</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="hl.css">
+</head>
+<body>
+<header id="toolbar">
+  <div class="group">
+    <button id="btn-tree" class="icon" title="Toggle file tree (Ctrl+B)"></button>
+    <button id="btn-back" class="icon" title="Back (Alt+Left)"></button>
+    <button id="btn-fwd" class="icon" title="Forward (Alt+Right)"></button>
+  </div>
+  <div id="doc-path" class="doc-path"></div>
+  <div class="group">
+    <button id="btn-find" class="icon" title="Find (Ctrl+F)"></button>
+    <button id="btn-theme" class="icon" title="Toggle light / dark (Ctrl+L)"></button>
+    <button id="btn-source" class="toggle" title="Toggle source pane (Ctrl+E)"><span class="ico"></span><span>Source</span></button>
+  </div>
+</header>
+<div id="findbar" hidden>
+  <input id="find-input" type="search" placeholder="Find in document" spellcheck="false">
+  <button id="find-prev" class="icon small" title="Previous (Shift+Enter)"></button>
+  <button id="find-next" class="icon small" title="Next (Enter)"></button>
+  <button id="find-close" class="icon small" title="Close (Esc)"></button>
+</div>
+<main id="layout">
+  <aside id="tree-pane">
+    <div class="pane-head">
+      <button id="btn-up" class="icon small" title="Go up one folder (Backspace)"></button>
+      <div id="crumbs" class="crumbs"></div>
+      <button id="btn-all" class="icon small" title="Show all files"></button>
+      <button id="btn-refresh" class="icon small" title="Refresh"></button>
+    </div>
+    <ul id="tree" class="tree" role="tree"></ul>
+  </aside>
+  <div class="splitter" id="split-left"></div>
+  <section id="preview-pane">
+    <article id="preview" class="markdown-body"></article>
+  </section>
+  <div class="splitter" id="split-right"></div>
+  <section id="source-pane">
+    <div id="source" class="source"><pre class="gutter" id="gutter"></pre><pre class="code"><code id="source-code"></code></pre></div>
+  </section>
+</main>
+<script src="app.js"></script>
+</body>
+</html>
