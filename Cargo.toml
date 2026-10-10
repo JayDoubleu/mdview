@@ -23,6 +23,10 @@ syntect = { version = "5", default-features = false, features = ["default-fancy"
 tao = "0.37"
 wry = "0.57"
 
+[target.'cfg(not(any(target_os = "windows", target_os = "macos")))'.dependencies]
+# Same version wry uses; only needed to tune WebKitGTK settings.
+webkit2gtk = "=2.0.2"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 muda = "0.21"
 

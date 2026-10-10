@@ -165,6 +165,8 @@ fn main() -> wry::Result<()> {
     }
     #[cfg(not(unix))]
     let _ = wait;
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    webkitgtk_env();
     let launch = Arc::new(launch);
 
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
@@ -227,7 +229,9 @@ fn main() -> wry::Result<()> {
     let webview = {
         use tao::platform::unix::WindowExtUnix;
         use wry::WebViewBuilderExtUnix;
-        builder.build_gtk(window.default_vbox().expect("no gtk vbox"))?
+        let webview = builder.build_gtk(window.default_vbox().expect("no gtk vbox"))?;
+        tune_webkitgtk(&webview);
+        webview
     };
 
     let mut watcher = make_watcher(proxy.clone());
@@ -268,6 +272,28 @@ fn main() -> wry::Result<()> {
             _ => {}
         }
     });
+}
+
+/// WebKitGTK's GPU (DMA-BUF) renderer stutters badly with NVIDIA's driver.
+/// Must run before WebKit starts; an explicit setting from the user wins.
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn webkitgtk_env() {
+    const VAR: &str = "WEBKIT_DISABLE_DMABUF_RENDERER";
+    if std::env::var_os(VAR).is_none() && Path::new("/proc/driver/nvidia/version").exists() {
+        // SAFETY: called at startup before any other threads exist.
+        unsafe { std::env::set_var(VAR, "1") };
+    }
+}
+
+/// WebKitGTK animates wheel scrolling, which feels laggy next to native apps.
+/// Scroll immediately instead unless MDVIEW_SMOOTH_SCROLL is set.
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn tune_webkitgtk(webview: &wry::WebView) {
+    use webkit2gtk::{SettingsExt, WebViewExt};
+    use wry::WebViewExtUnix;
+    if let Some(settings) = WebViewExt::settings(&webview.webview()) {
+        settings.set_enable_smooth_scrolling(std::env::var_os("MDVIEW_SMOOTH_SCROLL").is_some());
+    }
 }
 
 /// macOS needs an application menu for standard shortcuts (Cmd+C, Cmd+A, Cmd+Q...) to work.

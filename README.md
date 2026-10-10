@@ -71,6 +71,8 @@ By default `mdview` hands the terminal back straight away, like `code`. Pass `--
 | <kbd>Backspace</kbd> | Tree: go up one folder |
 | <kbd>Ctrl+W</kbd> / <kbd>Ctrl+Q</kbd> | Close |
 
+On Linux, mdview turns off WebKitGTK's animated wheel scrolling because it feels laggy. Set `MDVIEW_SMOOTH_SCROLL=1` to bring it back. On NVIDIA drivers it also sets `WEBKIT_DISABLE_DMABUF_RENDERER=1`, which avoids WebKitGTK's well-known stutter there, unless you've set that variable yourself.
+
 You can drag the dividers to resize the panes. mdview remembers pane sizes, theme and zoom between runs.
 
 ## How it works
