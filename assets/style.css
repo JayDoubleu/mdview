@@ -771,6 +771,8 @@ body.busy::after {
   transition: opacity .12s;
 }
 aside.annotation:hover .annotation-actions, .annotation-actions:focus-within { opacity: 1; }
+/* Hidden while the preview lags behind the editor (its positions are stale). */
+#preview.stale .annotation-actions { display: none; }
 .annotation-actions button {
   height: 24px;
   padding: 0 8px;

@@ -8,7 +8,8 @@ use serde_json::{Value, json};
 use std::borrow::Cow;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
 use wry::http::{Request, Response, header::CONTENT_TYPE};
 
 include!(concat!(env!("OUT_DIR"), "/assets.rs"));
@@ -54,12 +55,7 @@ pub fn handle(launch: &Launch, req: Request<Vec<u8>>) -> Resp {
         "/api/counts" => folder_counts(q("path").unwrap_or(".")),
         "/api/render" => render_file(q("path").unwrap_or("")),
         "/api/source" => source_file(q("path").unwrap_or("")),
-        "/api/raw" => read_text_enc(q("path").unwrap_or("")).map(|(_, text, enc)| {
-            let mut r = respond("text/plain; charset=utf-8", Cow::Owned(text.into_bytes()));
-            r.headers_mut()
-                .insert("X-Mdview-Encoding", enc.label().parse().unwrap());
-            r
-        }),
+        "/api/raw" => raw_file(q("path").unwrap_or("")),
         "/api/resolve" => Ok(json_resp(resolve(
             q("base").unwrap_or(""),
             q("rel").unwrap_or(""),
@@ -190,6 +186,20 @@ const COUNT_BUDGET: usize = 20_000;
 
 /// Markdown file counts (including subfolders) for each folder inside `dir`.
 fn folder_counts(dir: &str) -> Res {
+    // A few requests at a time at most; the page simply skips the badges otherwise.
+    static RUNNING: AtomicUsize = AtomicUsize::new(0);
+    struct Slot;
+    impl Drop for Slot {
+        fn drop(&mut self) {
+            RUNNING.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    if RUNNING.fetch_add(1, Ordering::SeqCst) >= 4 {
+        RUNNING.fetch_sub(1, Ordering::SeqCst);
+        return Err((503, "busy".into()));
+    }
+    let _slot = Slot;
+    let mut budget = COUNT_BUDGET * 5;
     let dir = canon(Path::new(dir));
     let rd = fs::read_dir(&dir).map_err(|e| (404, format!("{}: {e}", dir.display())))?;
     let mut counts = serde_json::Map::new();
@@ -197,28 +207,34 @@ fn folder_counts(dir: &str) -> Res {
         if e.file_name().to_string_lossy().starts_with('.') {
             continue;
         }
-        let path = e.path();
-        if !fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false) {
+        // Symlinked folders aren't followed (they may point at / or $HOME).
+        if !e.file_type().is_ok_and(|t| t.is_dir()) {
             continue;
         }
-        let (n, complete) = count_markdown(&path, COUNT_BUDGET);
+        let path = e.path();
+        // Each folder gets up to COUNT_BUDGET entries, all of them together 5×.
+        let mut share = budget.min(COUNT_BUDGET);
+        let before = share;
+        let (n, complete) = count_markdown(&path, &mut share);
+        budget -= before - share;
         counts.insert(ps(&path), json!({ "n": n, "partial": !complete }));
     }
     Ok(json_resp(json!({ "path": ps(&dir), "counts": counts })))
 }
 
 /// Counts Markdown files under `dir`, skipping hidden entries and not following
-/// symlinked folders. Returns `(count, complete)`; incomplete if the budget ran out.
-pub fn count_markdown(dir: &Path, mut budget: usize) -> (usize, bool) {
+/// symlinked folders. Returns `(count, complete)`; incomplete if the budget
+/// (entries to look at, shared by the caller) ran out.
+pub fn count_markdown(dir: &Path, budget: &mut usize) -> (usize, bool) {
     let mut stack = vec![dir.to_path_buf()];
     let mut n = 0;
     while let Some(d) = stack.pop() {
         let Ok(rd) = fs::read_dir(&d) else { continue };
         for e in rd.flatten() {
-            if budget == 0 {
+            if *budget == 0 {
                 return (n, false);
             }
-            budget -= 1;
+            *budget -= 1;
             if e.file_name().to_string_lossy().starts_with('.') {
                 continue;
             }
@@ -231,6 +247,33 @@ pub fn count_markdown(dir: &Path, mut budget: usize) -> (usize, bool) {
         }
     }
     (n, true)
+}
+
+/// The file last handed to the editor; the only one `save` may write.
+static EDITABLE: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+fn raw_file(path: &str) -> Res {
+    let p = canon(Path::new(path));
+    let bytes = fs::read(&p).map_err(|e| (404, format!("{}: {e}", p.display())))?;
+    let (text, enc, lossy) = text::decode_checked(&bytes);
+    *EDITABLE.lock().unwrap_or_else(|e| e.into_inner()) = Some(p);
+    let mut r = respond("text/plain; charset=utf-8", Cow::Owned(text.into_bytes()));
+    let h = r.headers_mut();
+    h.insert("X-Mdview-Encoding", enc.label().parse().unwrap());
+    if lossy {
+        h.insert("X-Mdview-Lossy", "1".parse().unwrap());
+    }
+    Ok(r)
+}
+
+/// Whether `p` is the file the editor loaded (checked before saving, so the
+/// page can only ever write back the file it is editing).
+pub fn is_editable(p: &Path) -> bool {
+    EDITABLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_deref()
+        .is_some_and(|e| e == canon(p))
 }
 
 fn read_text(path: &str) -> Result<(PathBuf, String), (u16, String)> {
@@ -338,7 +381,14 @@ pub fn save_file(p: &Path, new_text: &str) -> Result<Option<String>, String> {
     if !meta.is_file() || !is_markdown(p) {
         return Err(format!("{} is not a Markdown file", p.display()));
     }
-    let (old, enc) = text::decode(&fs::read(p).unwrap_or_default());
+    let (old, enc, lossy) = text::decode_checked(&fs::read(p).unwrap_or_default());
+    if lossy {
+        return Err(format!(
+            "{} contains bytes that aren't valid {}. Saving would damage them, so it was not saved.",
+            p.display(),
+            enc.label()
+        ));
+    }
     let new_text = new_text.replace("\r\n", "\n");
     let body = if old.contains("\r\n") {
         new_text.replace('\n', "\r\n")
@@ -438,9 +488,9 @@ mod tests {
         ] {
             fs::write(dir.join(f), "#").unwrap();
         }
-        assert_eq!(count_markdown(&dir, 1000), (3, true));
-        assert_eq!(count_markdown(&dir.join("empty"), 1000), (0, true));
-        assert!(!count_markdown(&dir, 2).1);
+        assert_eq!(count_markdown(&dir, &mut 1000), (3, true));
+        assert_eq!(count_markdown(&dir.join("empty"), &mut 1000), (0, true));
+        assert!(!count_markdown(&dir, &mut 2).1);
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -483,6 +533,11 @@ mod tests {
         // Characters Windows-1252 can't hold fall back to UTF-8, with a note.
         assert!(save_file(&f, "emoji 😀\n").unwrap().is_some());
         assert_eq!(fs::read_to_string(&f).unwrap(), "emoji 😀\r\n");
+        // A UTF-8 file with a damaged byte is left alone rather than rewritten.
+        let damaged = b"caf\xc3\xa9 \x92s\n";
+        fs::write(&f, damaged).unwrap();
+        assert!(save_file(&f, "anything\n").is_err());
+        assert_eq!(fs::read(&f).unwrap(), damaged);
         fs::remove_dir_all(&dir).unwrap();
     }
 

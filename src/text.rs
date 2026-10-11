@@ -34,36 +34,63 @@ const CP1252_HIGH: [char; 32] = [
 ];
 
 pub fn decode(bytes: &[u8]) -> (String, Encoding) {
+    let (text, enc, _) = decode_checked(bytes);
+    (text, enc)
+}
+
+/// Like [`decode`], also saying whether anything was lost (bytes that weren't
+/// valid in the detected encoding). Saving such text would damage the file.
+pub fn decode_checked(bytes: &[u8]) -> (String, Encoding, bool) {
     if let Some(rest) = bytes.strip_prefix(b"\xEF\xBB\xBF") {
-        return (
-            String::from_utf8_lossy(rest).into_owned(),
-            Encoding::Utf8Bom,
-        );
+        let (text, lossy) = utf8(rest);
+        return (text, Encoding::Utf8Bom, lossy);
     }
     if let Some(rest) = bytes.strip_prefix(b"\xFF\xFE") {
-        return (utf16(rest, u16::from_le_bytes), Encoding::Utf16Le);
+        let (text, lossy) = utf16(rest, u16::from_le_bytes);
+        return (text, Encoding::Utf16Le, lossy);
     }
     if let Some(rest) = bytes.strip_prefix(b"\xFE\xFF") {
-        return (utf16(rest, u16::from_be_bytes), Encoding::Utf16Be);
+        let (text, lossy) = utf16(rest, u16::from_be_bytes);
+        return (text, Encoding::Utf16Be, lossy);
     }
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return (s.to_owned(), Encoding::Utf8, false);
+    }
+    // Mostly UTF-8 with a stray bad byte: decoding it all as Windows-1252
+    // would garble every accented letter, so keep UTF-8 and flag the damage.
+    let (mut good, mut bad) = (0, 0);
+    for chunk in bytes.utf8_chunks() {
+        good += chunk.valid().chars().filter(|c| !c.is_ascii()).count();
+        bad += usize::from(!chunk.invalid().is_empty());
+    }
+    if good > 0 && good >= bad {
+        let (text, _) = utf8(bytes);
+        return (text, Encoding::Utf8, true);
+    }
+    let text = bytes
+        .iter()
+        .map(|&b| match b {
+            0x80..=0x9F => CP1252_HIGH[(b - 0x80) as usize],
+            _ => b as char,
+        })
+        .collect();
+    (text, Encoding::Windows1252, false)
+}
+
+fn utf8(bytes: &[u8]) -> (String, bool) {
     match std::str::from_utf8(bytes) {
-        Ok(s) => (s.to_owned(), Encoding::Utf8),
-        Err(_) => {
-            let text = bytes
-                .iter()
-                .map(|&b| match b {
-                    0x80..=0x9F => CP1252_HIGH[(b - 0x80) as usize],
-                    _ => b as char,
-                })
-                .collect();
-            (text, Encoding::Windows1252)
-        }
+        Ok(s) => (s.to_owned(), false),
+        Err(_) => (String::from_utf8_lossy(bytes).into_owned(), true),
     }
 }
 
-fn utf16(bytes: &[u8], f: fn([u8; 2]) -> u16) -> String {
+fn utf16(bytes: &[u8], f: fn([u8; 2]) -> u16) -> (String, bool) {
     let units: Vec<u16> = bytes.chunks_exact(2).map(|c| f([c[0], c[1]])).collect();
-    String::from_utf16_lossy(&units)
+    let odd = bytes.len() % 2 == 1;
+    match String::from_utf16(&units) {
+        Ok(s) => (s, odd),
+        Err(_) => (String::from_utf16_lossy(&units), true),
+    }
 }
 
 /// Encodes `text` back into `enc`. Returns `None` when a character can't be
@@ -111,6 +138,16 @@ mod tests {
             let bytes = encode(text, enc).unwrap();
             assert_eq!(decode(&bytes), (text.to_string(), enc), "{enc:?}");
         }
+    }
+
+    #[test]
+    fn stray_bytes_in_utf8_are_flagged_not_garbled() {
+        let (text, enc, lossy) = decode_checked(b"caf\xc3\xa9 \x92s\n");
+        assert_eq!((enc, lossy), (Encoding::Utf8, true));
+        assert!(text.starts_with("café "), "{text}");
+        assert!(decode_checked(b"\xEF\xBB\xBFok\xff").2);
+        assert!(decode_checked(b"\xFF\xFEa\x00b").2, "odd UTF-16 length");
+        assert!(!decode_checked(b"plain").2);
     }
 
     #[test]

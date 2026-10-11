@@ -77,7 +77,8 @@
   const basename = (p) => p.split(/[\\/]/).filter(Boolean).pop() || p;
   const dirname = (p) => {
     const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
-    return i <= 0 ? p.slice(0, i + 1) || p : p.slice(0, i);
+    const d = i <= 0 ? p.slice(0, i + 1) || p : p.slice(0, i);
+    return /^[A-Za-z]:$/.test(d) ? d + "\\" : d; // "C:\\a.md" -> "C:\\"
   };
   const samePath = (a, b) => a && b && (S.sep === "\\" ? a.toLowerCase() === b.toLowerCase() : a === b);
   const isUnder = (p, dir) => {
@@ -381,6 +382,8 @@
   async function openFile(path, opts = {}) {
     const { push = true, anchor = null, keepScroll = false } = opts;
     if (!(await confirmLeave())) return false;
+    document.querySelector(".undo-toast")?.remove();
+    cancelRender();
     let doc;
     const busy = setBusy();
     try {
@@ -740,6 +743,7 @@
       }
       for (const d of pendingDirs) refreshDir(d).then(() => refreshCounts(d));
       pendingDirs.clear();
+      syncWatches();
     }, 120);
   }
 
@@ -777,6 +781,7 @@
     const r = await fetch(`api/raw?${new URLSearchParams({ path })}`);
     if (!r.ok) throw new Error(await r.text());
     S.encoding = r.headers.get("X-Mdview-Encoding") || "UTF-8";
+    S.lossy = r.headers.get("X-Mdview-Lossy") === "1";
     // Textareas use \n; compare and edit in that form.
     return (await r.text()).replace(/\r\n?/g, "\n");
   }
@@ -938,14 +943,14 @@
       }
       if (!n) return -1;
       const m = FULL_POS.exec(n.dataset.sourcepos);
-      return isEnd ? Math.min(text.length, textOffset(text, +m[3], +m[4]) + 1) : textOffset(text, +m[1], +m[2]);
+      return isEnd ? Math.min(text.length, textOffset(text, +m[3], +m[4] + 1)) : textOffset(text, +m[1], +m[2]);
     }
     const start = (node.nodeType === 1 ? node : node.parentElement)?.closest("[data-sourcepos]");
     if (!start || !preview.contains(start)) return -1;
     const m = FULL_POS.exec(start.dataset.sourcepos);
     if (!m) return -1;
     let from = textOffset(text, +m[1], +m[2]);
-    const to = Math.min(text.length, textOffset(text, +m[3], +m[4]) + 1);
+    const to = Math.min(text.length, textOffset(text, +m[3], +m[4] + 1));
     let root = start;
     // Code blocks and front matter: skip the fence line, ignore the summary.
     const pre = (node.nodeType === 1 ? node : node.parentElement).closest("pre");
@@ -1069,12 +1074,21 @@
 
   async function loadEditor(keepScroll = false) {
     const scroll = sourcePane.scrollTop;
+    const path = S.file;
+    cancelRender();
+    // Until the new text is in, the buffer belongs to no file: no typing, no saving.
+    S.editPath = null;
+    editor.readOnly = true;
     try {
-      S.savedText = await readRaw(S.file);
+      S.savedText = await readRaw(path);
     } catch (e) {
+      editor.readOnly = false;
       showToast(String(e.message || e));
       return leaveEdit(true);
     }
+    if (!samePath(path, S.file)) return; // another file was opened meanwhile
+    editor.readOnly = false;
+    S.editPath = path;
     editor.value = S.savedText;
     fitEditor();
     updateCursor(true);
@@ -1094,7 +1108,9 @@
     $("#btn-edit").title = "Lock editing";
     applyLayout();
     await loadEditor();
-    if (S.encoding && S.encoding !== "UTF-8") {
+    if (S.lossy) {
+      showToast(`This file has bytes that aren't valid ${S.encoding}. mdview won't save it, to avoid damaging them.`);
+    } else if (S.encoding && S.encoding !== "UTF-8") {
       showToast(`This file is ${S.encoding}. Saving keeps that encoding.`, false);
     }
     editor.setSelectionRange(0, 0);
@@ -1108,6 +1124,9 @@
     const restore = S.previewIsBuffer;
     S.previewIsBuffer = false;
     S.editing = false;
+    S.editPath = null;
+    cancelRender();
+    document.querySelector(".undo-toast")?.remove();
     setDirty(false);
     $("#editor-wrap").hidden = true;
     $("#btn-discard").hidden = true;
@@ -1139,19 +1158,40 @@
     if (S.docName) ipc("title", `${S.dirty ? "● " : ""}${S.docName} — mdview`);
   }
 
+  // While the preview lags behind the buffer its source positions are stale,
+  // so the actions that use them (Resolve) are hidden until it catches up.
   let renderTimer = 0;
   let renderSeq = 0;
   function onEdit() {
     fitEditor();
     setDirty(editor.value !== S.savedText);
     clearTimeout(renderTimer);
+    S.renderPending = true;
+    preview.classList.add("stale");
     renderTimer = setTimeout(renderBuffer, 120);
+  }
+
+  function cancelRender() {
+    clearTimeout(renderTimer);
+    renderSeq++;
+    S.renderPending = false;
+    preview.classList.remove("stale");
+  }
+
+  // Brings the preview up to date with the buffer now.
+  async function flushRender() {
+    if (!S.editing || !S.renderPending) return;
+    clearTimeout(renderTimer);
+    await renderBuffer();
   }
 
   async function renderBuffer() {
     const seq = ++renderSeq;
+    const file = S.file;
     const res = await rpc("render_text", editor.value);
-    if (!res || seq !== renderSeq || !S.editing) return;
+    if (!res || seq !== renderSeq || !S.editing || !samePath(file, S.file)) return;
+    S.renderPending = false;
+    preview.classList.remove("stale");
     const scroll = previewPane.scrollTop;
     preview.innerHTML = res.html;
     enhance();
@@ -1178,9 +1218,9 @@
   }
 
   async function save() {
-    if (!S.editing || !S.file) return false;
+    if (!S.editing || !S.editPath) return false;
     const text = editor.value;
-    const res = await rpc("save", text, { path: S.file });
+    const res = await rpc("save", text, { path: S.editPath });
     if (!res || !res.ok) {
       showToast(`Couldn't save: ${(res && res.error) || "unknown error"}`);
       return false;
@@ -1251,8 +1291,9 @@
     if (!document.execCommand("insertText", false, S.savedText)) editor.value = S.savedText;
     editor.setSelectionRange(0, 0);
     onEdit();
+    const file = S.file;
     showUndoToast("Changes discarded", () => {
-      if (!S.editing) return;
+      if (!S.editing || !samePath(file, S.editPath)) return;
       editor.value = discarded;
       onEdit();
       editor.focus({ preventScroll: true });
@@ -1300,8 +1341,15 @@
   async function annotate(t) {
     if (!S.file) return;
     if (t.range) {
+      // Map the preview selection onto the text the preview was made from:
+      // the buffer while editing, the file otherwise.
       let raw;
-      try { raw = await readRaw(S.file); } catch (e) { return showToast(String(e.message || e)); }
+      if (S.editing) {
+        if (S.renderPending) return showToast("The preview is still updating. Try again in a moment.");
+        raw = editor.value;
+      } else {
+        try { raw = await readRaw(S.file); } catch (e) { return showToast(String(e.message || e)); }
+      }
       const r = previewSelectionRange(raw, t.range);
       if (!r) return showToast("Couldn't find that selection in the source");
       t = { s: r[0], e: r[1], text: raw };
@@ -1318,6 +1366,8 @@
       await enterEdit();
       if (!S.editing) return;
     }
+    // Block positions come from the preview, so it must match the buffer.
+    await flushRender();
     // The file may differ from what was selected in (e.g. line endings): find
     // the quote again, nearest to where it was.
     const text = editor.value;
@@ -1333,7 +1383,8 @@
   }
 
   function annotationText(quote, note) {
-    const safe = (x) => x.replace(/-->/g, "-- >");
+    // Comments end at --> (and at --!> in browsers); break both up.
+    const safe = (x) => x.replace(/--(!?)>/g, "-- $1>");
     let q = quote;
     if (q.length > 400) q = q.slice(0, 220) + " … " + q.slice(-150);
     q = safe(q);
@@ -1372,19 +1423,31 @@
   }
 
   async function resolveAnnotation(card) {
-    const pos = parsePos(card.dataset.sourcepos);
-    if (!pos) return;
+    const m = FULL_POS.exec(card.dataset.sourcepos || "");
+    if (!m || preview.classList.contains("stale")) return;
+    const [line, col, last] = [+m[1], +m[2], +m[3]];
     if (!S.editing) {
       await enterEdit();
       if (!S.editing) return;
     }
+    // Delete only what is really that note: the marker where the card says,
+    // closed on the card's last line. Anything else means the card is stale
+    // (or isn't a real note), and nothing is touched.
     const text = editor.value;
-    const a = textOffset(text, pos[0], 1);
-    let b = Math.min(text.length, textOffset(text, pos[1] + 1, 1));
-    if (!text.startsWith("<!-- ANNOTATION", a)) return showToast("Couldn't find this note in the file");
-    // Take the blank line after it too.
-    const next = text.indexOf("\n", b);
-    if (b < text.length && !text.slice(b, next === -1 ? text.length : next).trim()) b = next === -1 ? text.length : next + 1;
+    const at = textOffset(text, line, col);
+    const close = text.indexOf("-->", at);
+    if (!text.startsWith("<!-- ANNOTATION", at) || close === -1 || lineAt(text, close) !== last) {
+      return showToast("Couldn't find this note in the file");
+    }
+    const lineStart = textOffset(text, line, 1);
+    const a = /^[\s>]*$/.test(text.slice(lineStart, at)) ? lineStart : at;
+    let b = close + 3;
+    const eol = (i) => { const n = text.indexOf("\n", i); return n === -1 ? text.length : n + 1; };
+    if (!text.slice(b, eol(b)).trim()) {
+      b = eol(b);
+      // Take the blank line after it too.
+      if (b < text.length && !text.slice(b, eol(b)).trim()) b = eol(b);
+    }
     editor.focus({ preventScroll: true });
     editor.setSelectionRange(a, b);
     if (!document.execCommand("delete")) {
@@ -1457,6 +1520,8 @@
 
   // Called by the app when the window is closing with unsaved edits.
   async function requestClose() {
+    ipc("close_ack");
+    if (!$("#modal").hidden) return; // already asking
     if (await confirmLeave()) ipc("quit");
   }
 

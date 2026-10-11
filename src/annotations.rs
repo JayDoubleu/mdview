@@ -14,72 +14,33 @@
 //! preview shows each annotation as a note card.
 
 use crate::render::html_escape;
+use comrak::nodes::{AstNode, NodeValue};
 
 pub const MARKER: &str = "<!-- ANNOTATION";
 
-/// Replaces the annotation comments in rendered `html` with note cards.
-/// `src` is the Markdown it came from, used to give each card its source lines.
-pub fn render(html: &str, src: &str) -> String {
-    if !html.contains(MARKER) {
-        return html.to_string();
-    }
-    let lines = source_lines(src);
-    let mut out = String::with_capacity(html.len());
-    let mut rest = html;
-    let mut n = 0;
-    while let Some(i) = rest.find(MARKER) {
-        let body_start = i + MARKER.len();
-        let Some(len) = rest[body_start..].find("-->") else {
-            break;
+/// Turns annotation comments in the parsed document into note cards.
+///
+/// Only HTML blocks that start with the marker count: comrak has already
+/// decided they aren't code, and gives their exact source position. Inline
+/// comments and anything else stay ordinary (hidden) comments.
+pub fn mark_cards<'a>(root: &'a AstNode<'a>) {
+    for node in root.descendants() {
+        let mut data = node.data.borrow_mut();
+        let pos = data.sourcepos;
+        let NodeValue::HtmlBlock(block) = &mut data.value else {
+            continue;
         };
-        out.push_str(&rest[..i]);
-        // The positions are only trusted when every comment was matched.
-        let pos = lines.get(n).filter(|_| lines.len() == count(html));
-        out.push_str(&card(&rest[body_start..body_start + len], pos));
-        rest = &rest[body_start + len + 3..];
-        n += 1;
-    }
-    out.push_str(rest);
-    out
-}
-
-fn count(html: &str) -> usize {
-    html.matches(MARKER).count()
-}
-
-/// First and last line of each annotation comment in `src`, skipping code fences.
-fn source_lines(src: &str) -> Vec<(usize, usize)> {
-    let mut found = Vec::new();
-    let mut fence: Option<&str> = None;
-    let mut open: Option<usize> = None;
-    for (i, line) in src.lines().enumerate() {
-        let t = line.trim_start();
-        if let Some(start) = open {
-            if line.contains("-->") {
-                found.push((start, i + 1));
-                open = None;
-            }
+        let Some(body) = block.literal.trim_start().strip_prefix(MARKER) else {
             continue;
-        }
-        if let Some(f) = fence {
-            if t.starts_with(f) {
-                fence = None;
-            }
+        };
+        let Some(end) = body.find("-->") else {
             continue;
-        }
-        if t.starts_with("```") {
-            fence = Some("```");
-        } else if t.starts_with("~~~") {
-            fence = Some("~~~");
-        } else if let Some(rest) = line.strip_prefix(MARKER) {
-            if rest.contains("-->") {
-                found.push((i + 1, i + 1));
-            } else {
-                open = Some(i + 1);
-            }
-        }
+        };
+        let range = (pos.start.line, pos.start.column, pos.end.line);
+        let card = card(&body[..end], range);
+        // Anything after the comment on its last line is left as it was.
+        block.literal = card + &body[end + 3..];
     }
-    found
 }
 
 /// Splits a comment body into the quoted selection and the note.
@@ -114,11 +75,11 @@ fn parse(body: &str) -> (String, String) {
     (quote.join("\n"), note.join("\n").trim().to_string())
 }
 
-fn card(body: &str, pos: Option<&(usize, usize)>) -> String {
+/// `pos` is the comment's first line and column and its last line.
+fn card(body: &str, pos: (usize, usize, usize)) -> String {
     let (quote, note) = parse(body);
-    let pos = pos
-        .map(|(a, b)| format!(" data-sourcepos=\"{a}:1-{b}:3\""))
-        .unwrap_or_default();
+    let (a, col, b) = pos;
+    let pos = format!(" data-sourcepos=\"{a}:{col}-{b}:3\"");
     let mut out = format!("<aside class=\"annotation\"{pos}><div class=\"annotation-note\">");
     out.push_str(&html_escape(if note.is_empty() {
         "(empty note)"
@@ -170,5 +131,41 @@ mod tests {
         let html = markdown("<!-- just a comment -->\n\ntext\n");
         assert!(!html.contains("annotation"), "{html}");
         assert!(!html.contains("just a comment"), "{html}");
+    }
+
+    #[test]
+    fn positions_come_from_the_parser() {
+        // A ```` fence closed only by ````, holding a ``` line and a marker,
+        // followed by a real note inside a blockquote.
+        let src = "````md\n```\n<!-- ANNOTATION\nNote: ex\n-->\n````\n\n> <!-- ANNOTATION\n> Note: real\n> -->\n";
+        let html = markdown(src);
+        assert_eq!(html.matches("<aside").count(), 1, "{html}");
+        assert!(html.contains("data-sourcepos=\"8:3-10:3\""), "{html}");
+        // Inside a list item, and inline in a paragraph (stays hidden).
+        let html = markdown(
+            "- item\n\n  <!-- ANNOTATION\n  Note: n\n  -->\n\ntext <!-- ANNOTATION Note: x --> more\n",
+        );
+        assert!(html.contains("data-sourcepos=\"3:3-5:3\""), "{html}");
+        assert_eq!(html.matches("<aside").count(), 1, "{html}");
+    }
+
+    #[test]
+    fn many_notes_render_quickly() {
+        let src = "<!-- ANNOTATION\nNote: n\n-->\n\n".repeat(20_000);
+        let t = std::time::Instant::now();
+        let html = markdown(&src);
+        assert_eq!(html.matches("<aside").count(), 20_000);
+        assert!(t.elapsed().as_secs() < 10, "took {:?}", t.elapsed());
+    }
+
+    #[test]
+    fn notes_cannot_inject_markup() {
+        let html = markdown(
+            "<!-- ANNOTATION\nSelected: \"<img src=x onerror=alert(1)>\"\nNote: <script>alert(1)</script>\" onmouseover=\"x\n-->\n",
+        );
+        assert!(!html.contains("<script"), "{html}");
+        assert!(!html.contains("<img"), "{html}");
+        // The quote can't escape its element: still exactly the two divs.
+        assert_eq!(html.matches('<').count(), 6, "{html}");
     }
 }

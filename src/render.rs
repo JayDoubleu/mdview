@@ -1,9 +1,9 @@
 //! Markdown -> HTML rendering (GitHub flavoured) and syntax-highlighted source view.
 
 use comrak::adapters::{CodefenceRendererAdapter, SyntaxHighlighterAdapter};
-use comrak::nodes::Sourcepos;
+use comrak::nodes::{AstNode, NodeValue, Sourcepos};
 use comrak::plugins::syntect::{SyntectAdapter, SyntectAdapterBuilder};
-use comrak::{Options, markdown_to_html_with_plugins, options::Plugins};
+use comrak::{Arena, Options, format_html_with_plugins, options::Plugins, parse_document};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -132,63 +132,74 @@ pub fn markdown(src: &str) -> String {
         .render
         .codefence_renderers
         .insert("mermaid".into(), &Mermaid);
-    // comrak skips YAML front matter (keeping line numbers intact); show it as
-    // a collapsible panel at the top instead of dropping it silently. TOML
-    // front matter (Hugo's +++) gets the same treatment: its delimiters are
-    // swapped for --- so comrak skips it too.
-    let fm = front_matter(src);
-    let toml_src;
-    let body_src = match &fm {
-        Some(f) if f.toml => {
-            toml_src = src
-                .split_inclusive('\n')
-                .enumerate()
-                .map(|(i, l)| {
-                    if i == 0 || i + 1 == f.last_line {
-                        "---\n"
-                    } else {
-                        l
-                    }
-                })
-                .collect::<String>();
-            toml_src.as_str()
-        }
-        _ => src,
+    let arena = Arena::new();
+    // TOML front matter (Hugo's +++) is parsed with its delimiters swapped for
+    // ---, so comrak treats it like YAML front matter; kept only if it does.
+    let toml_src = front_matter(src)
+        .filter(|f| f.toml)
+        .map(|f| toml_as_yaml(src, f.last_line));
+    let (root, toml) = match toml_src
+        .as_deref()
+        .map(|t| parse_document(&arena, t, &opts))
+        .filter(|r| front_matter_node(r).is_some())
+    {
+        Some(r) => (r, true),
+        None => (parse_document(&arena, src, &opts), false),
     };
-    let mut html = fm.map(front_matter_html).unwrap_or_default();
-    html.push_str(&markdown_to_html_with_plugins(body_src, &opts, &plugins));
-    let html = crate::annotations::render(&html, body_src);
+    // comrak drops front matter from the HTML; show it as a collapsible panel
+    // instead. Line numbers come from comrak, so they always agree with it.
+    let mut html = front_matter_node(root)
+        .map(|last_line| front_matter_html(src, last_line, toml))
+        .unwrap_or_default();
+    crate::annotations::mark_cards(root);
+    format_html_with_plugins(root, &opts, &mut html, &plugins).expect("formatting to a String");
     sanitizer().clean(&html).to_string()
 }
 
-struct FrontMatter<'a> {
-    text: &'a str,
+/// Last line of the front matter comrak found, if any.
+fn front_matter_node<'a>(root: &'a AstNode<'a>) -> Option<usize> {
+    let first = root.first_child()?;
+    let data = first.data.borrow();
+    matches!(data.value, NodeValue::FrontMatter(_)).then_some(data.sourcepos.end.line)
+}
+
+fn toml_as_yaml(src: &str, last_line: usize) -> String {
+    src.split_inclusive('\n')
+        .enumerate()
+        .map(|(i, l)| {
+            if i == 0 || i + 1 == last_line {
+                if l.ends_with("\r\n") {
+                    "---\r\n"
+                } else {
+                    "---\n"
+                }
+            } else {
+                l
+            }
+        })
+        .collect()
+}
+
+struct FrontMatter {
     last_line: usize,
     toml: bool,
 }
 
-/// A leading `---` YAML (closed by `---` or `...`) or `+++` TOML block.
-fn front_matter(src: &str) -> Option<FrontMatter<'_>> {
+/// A leading `---` or `+++` block. Only used to spot TOML front matter; comrak
+/// decides what really counts as front matter.
+fn front_matter(src: &str) -> Option<FrontMatter> {
     let mut lines = src.split_inclusive('\n');
-    let toml = match lines.next()?.trim_end() {
-        "---" => false,
-        "+++" => true,
+    let (delim, toml) = match lines.next()?.trim_end() {
+        "---" => ("---", false),
+        "+++" => ("+++", true),
         _ => return None,
     };
-    let start = src.find('\n')? + 1;
-    let mut offset = start;
-    for (i, line) in lines.enumerate() {
-        let end = line.trim_end();
-        if (toml && end == "+++") || (!toml && matches!(end, "---" | "...")) {
-            return Some(FrontMatter {
-                text: &src[start..offset],
-                last_line: i + 2,
-                toml,
-            });
-        }
-        offset += line.len();
-    }
-    None
+    lines
+        .position(|l| l.trim_end() == delim)
+        .map(|i| FrontMatter {
+            last_line: i + 2,
+            toml,
+        })
 }
 
 /// Top-level YAML keys: unindented `key:` lines.
@@ -223,12 +234,15 @@ fn toml_fields(toml: &str) -> usize {
     keys + tables.len()
 }
 
-fn front_matter_html(fm: FrontMatter) -> String {
-    let FrontMatter {
-        text: yaml,
-        last_line,
-        toml,
-    } = fm;
+fn front_matter_html(src: &str, last_line: usize, toml: bool) -> String {
+    // The text between the delimiter lines.
+    let yaml: String = src
+        .trim_start_matches('\u{feff}')
+        .split_inclusive('\n')
+        .take(last_line.saturating_sub(1))
+        .skip(1)
+        .collect();
+    let yaml = yaml.as_str();
     let fields = if toml {
         toml_fields(yaml)
     } else {
@@ -287,7 +301,9 @@ fn sanitizer() -> &'static ammonia::Builder<'static> {
 /// Highlights raw markdown source, returning one `<span class="line">` per source line
 /// so every row has the same height as the line-number gutter.
 pub fn source(src: &str) -> String {
-    split_lines(&highlight_source(src))
+    // A lone \r would turn into an extra line break in the page.
+    let src = src.replace("\r\n", "\n");
+    split_lines(&highlight_source(&src))
 }
 
 fn highlight_source(src: &str) -> String {
@@ -507,6 +523,25 @@ mod tests {
         );
         assert!(!markdown("# No front matter\n").contains("class=\"front-matter\""));
         assert!(!markdown("---\nnot closed\n").contains("class=\"front-matter\""));
+    }
+
+    #[test]
+    fn front_matter_panel_matches_comrak() {
+        // Not front matter for comrak, so no panel and nothing hidden.
+        for src in [
+            "---\ntitle: x\n...\nHIDDEN\n\n# Body\n",
+            "---   \ntitle: x\n---\n",
+        ] {
+            let html = markdown(src);
+            assert!(!html.contains("class=\"front-matter\""), "{src:?}: {html}");
+            assert!(html.contains("title: x"), "{src:?}: {html}");
+        }
+        // CRLF front matter is still recognised.
+        let html = markdown("---\r\ntitle: x\r\n---\r\n\r\n# Body\r\n");
+        assert!(
+            html.contains("class=\"front-matter\" data-sourcepos=\"1:1-3:3\""),
+            "{html}"
+        );
     }
 
     #[test]

@@ -16,6 +16,8 @@
 - Annotations: right-click a selection (or press Ctrl/Cmd+Alt+M) to attach a note. It is stored in the file as an `<!-- ANNOTATION -->` comment that AI agents can read and act on, and the preview shows it as a card with a Resolve button.
 - Live reload now covers every folder shown in the file tree, not only the open file's folder.
 - Right-clicking no longer shows the webview's Back/Forward/Reload menu.
+- Saving refuses to overwrite a file that has bytes that aren't valid in its encoding (it would damage them), and a UTF-8 file with a stray bad byte is no longer shown as Windows-1252.
+- Folder badges don't follow symlinked folders, and counting is bounded per request.
 
 ## 0.1.0
 

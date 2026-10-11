@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use server::Launch;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tao::dpi::LogicalSize;
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
@@ -50,6 +51,7 @@ enum UserEvent {
     Reply(Value),
     /// Close the window, asking the page first if there are unsaved edits.
     CloseRequested,
+    CloseAck,
     Quit,
 }
 
@@ -259,6 +261,7 @@ fn main() -> wry::Result<()> {
     let mut watched: Vec<PathBuf> = Vec::new();
 
     let mut dirty = false;
+    let mut close_asked: Option<(Instant, bool)> = None;
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -269,10 +272,21 @@ fn main() -> wry::Result<()> {
             }
             | Event::UserEvent(UserEvent::CloseRequested) => {
                 // With unsaved edits the page asks first and replies with Quit.
-                if dirty {
+                // If it never even acknowledged the last request (it hung),
+                // closing again quits anyway.
+                let hung = close_asked.is_some_and(|(t, acked): (Instant, bool)| {
+                    !acked && t.elapsed() > Duration::from_secs(2)
+                });
+                if dirty && !hung {
                     send_js(&webview, "requestClose", Value::Null);
+                    close_asked = Some((Instant::now(), false));
                 } else {
                     *control_flow = ControlFlow::Exit;
+                }
+            }
+            Event::UserEvent(UserEvent::CloseAck) => {
+                if let Some((_, acked)) = close_asked.as_mut() {
+                    *acked = true;
                 }
             }
             Event::UserEvent(UserEvent::Quit) => *control_flow = ControlFlow::Exit,
@@ -282,7 +296,9 @@ fn main() -> wry::Result<()> {
             Event::UserEvent(UserEvent::Watch(dirs)) => {
                 if let Some(w) = watcher.as_mut() {
                     watched.retain(|d| {
-                        let keep = dirs.contains(d);
+                        // A deleted folder lost its watch; drop it so it is
+                        // watched again if it comes back.
+                        let keep = dirs.contains(d) && d.is_dir();
                         if !keep {
                             let _ = w.unwatch(d);
                         }
@@ -439,6 +455,9 @@ fn handle_ipc(proxy: &EventLoopProxy<UserEvent>, body: &str) {
         Some("close") => {
             let _ = proxy.send_event(UserEvent::CloseRequested);
         }
+        Some("close_ack") => {
+            let _ = proxy.send_event(UserEvent::CloseAck);
+        }
         Some("quit") => {
             let _ = proxy.send_event(UserEvent::Quit);
         }
@@ -452,7 +471,12 @@ fn handle_ipc(proxy: &EventLoopProxy<UserEvent>, body: &str) {
         }
         Some("save") => {
             let path = msg.get("path").and_then(Value::as_str).unwrap_or("");
-            let result = match server::save_file(Path::new(path), arg) {
+            let saved = if server::is_editable(Path::new(path)) {
+                server::save_file(Path::new(path), arg)
+            } else {
+                Err("That file isn't open for editing".into())
+            };
+            let result = match saved {
                 Ok(note) => json!({ "ok": true, "note": note }),
                 Err(e) => json!({ "ok": false, "error": e }),
             };
