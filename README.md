@@ -42,10 +42,13 @@ sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev      # Debian / Ubuntu
 sudo dnf install webkit2gtk4.1-devel gtk3-devel          # Fedora
 sudo pacman -S webkit2gtk-4.1 gtk3                       # Arch
 
-cargo install --git https://github.com/JayDoubleu/mdview
+cargo install --locked --git https://github.com/JayDoubleu/mdview
 ```
 
-Or clone the repo and run `cargo install --path .`. Either way the binary lands in `~/.cargo/bin`.
+Or clone the repo and run `cargo install --locked --path .`. Either way the binary lands in `~/.cargo/bin`.
+
+> [!NOTE]
+> mdview isn't published on crates.io. The `mdview` crate there is an unrelated project, so `cargo install mdview` installs something else.
 
 ## Usage
 
