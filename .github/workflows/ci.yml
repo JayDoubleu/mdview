@@ -80,7 +80,7 @@ jobs:
           New-Item -ItemType Directory -Force dist | Out-Null
           Compress-Archive -Path target/release/mdview.exe -DestinationPath dist/mdview-${{ matrix.name }}.zip
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: mdview-${{ matrix.name }}
           path: dist/*
