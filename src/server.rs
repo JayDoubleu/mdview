@@ -2,12 +2,14 @@
 //! that the frontend uses to list directories, render files and load local images.
 
 use crate::render;
+use crate::text;
 use percent_encoding::percent_decode_str;
 use serde_json::{Value, json};
 use std::borrow::Cow;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
 use wry::http::{Request, Response, header::CONTENT_TYPE};
 
 include!(concat!(env!("OUT_DIR"), "/assets.rs"));
@@ -50,8 +52,10 @@ pub fn handle(launch: &Launch, req: Request<Vec<u8>>) -> Resp {
             "version": env!("CARGO_PKG_VERSION"),
         }))),
         "/api/list" => list(q("path").unwrap_or("."), q("all") == Some("1")),
+        "/api/counts" => folder_counts(q("path").unwrap_or(".")),
         "/api/render" => render_file(q("path").unwrap_or("")),
         "/api/source" => source_file(q("path").unwrap_or("")),
+        "/api/raw" => raw_file(q("path").unwrap_or("")),
         "/api/resolve" => Ok(json_resp(resolve(
             q("base").unwrap_or(""),
             q("rel").unwrap_or(""),
@@ -171,10 +175,117 @@ fn list(dir: &str, all: bool) -> Res {
     })))
 }
 
-fn read_text(path: &str) -> Result<(PathBuf, String), (u16, String)> {
+/// Requests that can take a while (walking folder trees) and should be
+/// answered off the UI thread.
+pub fn is_slow(req: &Request<Vec<u8>>) -> bool {
+    req.uri().path() == "/api/counts"
+}
+
+/// How many entries to look at per folder before giving up and reporting "N+".
+const COUNT_BUDGET: usize = 20_000;
+
+/// Markdown file counts (including subfolders) for each folder inside `dir`.
+fn folder_counts(dir: &str) -> Res {
+    // A few requests at a time at most; the page simply skips the badges otherwise.
+    static RUNNING: AtomicUsize = AtomicUsize::new(0);
+    struct Slot;
+    impl Drop for Slot {
+        fn drop(&mut self) {
+            RUNNING.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    if RUNNING.fetch_add(1, Ordering::SeqCst) >= 4 {
+        RUNNING.fetch_sub(1, Ordering::SeqCst);
+        return Err((503, "busy".into()));
+    }
+    let _slot = Slot;
+    let mut budget = COUNT_BUDGET * 5;
+    let dir = canon(Path::new(dir));
+    let rd = fs::read_dir(&dir).map_err(|e| (404, format!("{}: {e}", dir.display())))?;
+    let mut counts = serde_json::Map::new();
+    for e in rd.flatten() {
+        if e.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
+        // Symlinked folders aren't followed (they may point at / or $HOME).
+        if !e.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let path = e.path();
+        // Each folder gets up to COUNT_BUDGET entries, all of them together 5×.
+        let mut share = budget.min(COUNT_BUDGET);
+        let before = share;
+        let (n, complete) = count_markdown(&path, &mut share);
+        budget -= before - share;
+        counts.insert(ps(&path), json!({ "n": n, "partial": !complete }));
+    }
+    Ok(json_resp(json!({ "path": ps(&dir), "counts": counts })))
+}
+
+/// Counts Markdown files under `dir`, skipping hidden entries and not following
+/// symlinked folders. Returns `(count, complete)`; incomplete if the budget
+/// (entries to look at, shared by the caller) ran out.
+pub fn count_markdown(dir: &Path, budget: &mut usize) -> (usize, bool) {
+    let mut stack = vec![dir.to_path_buf()];
+    let mut n = 0;
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            if *budget == 0 {
+                return (n, false);
+            }
+            *budget -= 1;
+            if e.file_name().to_string_lossy().starts_with('.') {
+                continue;
+            }
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_dir() {
+                stack.push(e.path());
+            } else if is_markdown(&e.path()) {
+                n += 1;
+            }
+        }
+    }
+    (n, true)
+}
+
+/// The file last handed to the editor; the only one `save` may write.
+static EDITABLE: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+fn raw_file(path: &str) -> Res {
     let p = canon(Path::new(path));
     let bytes = fs::read(&p).map_err(|e| (404, format!("{}: {e}", p.display())))?;
-    Ok((p, String::from_utf8_lossy(&bytes).into_owned()))
+    let (text, enc, lossy) = text::decode_checked(&bytes);
+    *EDITABLE.lock().unwrap_or_else(|e| e.into_inner()) = Some(p);
+    let mut r = respond("text/plain; charset=utf-8", Cow::Owned(text.into_bytes()));
+    let h = r.headers_mut();
+    h.insert("X-Mdview-Encoding", enc.label().parse().unwrap());
+    if lossy {
+        h.insert("X-Mdview-Lossy", "1".parse().unwrap());
+    }
+    Ok(r)
+}
+
+/// Whether `p` is the file the editor loaded (checked before saving, so the
+/// page can only ever write back the file it is editing).
+pub fn is_editable(p: &Path) -> bool {
+    EDITABLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_deref()
+        .is_some_and(|e| e == canon(p))
+}
+
+fn read_text(path: &str) -> Result<(PathBuf, String), (u16, String)> {
+    let (p, text, _) = read_text_enc(path)?;
+    Ok((p, text))
+}
+
+fn read_text_enc(path: &str) -> Result<(PathBuf, String, text::Encoding), (u16, String)> {
+    let p = canon(Path::new(path));
+    let bytes = fs::read(&p).map_err(|e| (404, format!("{}: {e}", p.display())))?;
+    let (text, enc) = text::decode(&bytes);
+    Ok((p, text, enc))
 }
 
 fn render_file(path: &str) -> Res {
@@ -203,15 +314,32 @@ fn resolve_path(base: &str, rel: &str) -> PathBuf {
     let rel = percent_decode_str(rel).decode_utf8_lossy();
     let rel = rel.strip_prefix("file://").unwrap_or(&rel);
     let rel_path = Path::new(rel);
-    if rel_path.is_absolute() {
-        return rel_path.to_path_buf();
-    }
     let base = Path::new(base);
     let dir = if base.is_dir() {
         base
     } else {
         base.parent().unwrap_or(base)
     };
+    if rel.starts_with(['/', '\\']) {
+        if rel_path.is_absolute() && rel_path.exists() {
+            return rel_path.to_path_buf();
+        }
+        // Static-site paths like /uploads/a.png are relative to the site root,
+        // which is an ancestor folder (or its static/ or public/ folder).
+        let trimmed = rel.trim_start_matches(['/', '\\']);
+        for ancestor in dir.ancestors() {
+            for sub in ["", "static", "public"] {
+                let candidate = ancestor.join(sub).join(trimmed);
+                if candidate.exists() {
+                    return candidate;
+                }
+            }
+        }
+        return rel_path.to_path_buf();
+    }
+    if rel_path.is_absolute() {
+        return rel_path.to_path_buf();
+    }
     dir.join(rel_path)
 }
 
@@ -243,6 +371,42 @@ fn local_file(base: &str, rel: &str) -> Res {
             .unwrap(),
     );
     Ok(resp)
+}
+
+/// Saves edited text over an existing Markdown file, keeping its line endings
+/// and encoding. Only Markdown files that already exist can be written.
+/// Returns a note for the user when the file couldn't be kept as it was.
+pub fn save_file(p: &Path, new_text: &str) -> Result<Option<String>, String> {
+    let meta = fs::metadata(p).map_err(|e| format!("{}: {e}", p.display()))?;
+    if !meta.is_file() || !is_markdown(p) {
+        return Err(format!("{} is not a Markdown file", p.display()));
+    }
+    let (old, enc, lossy) = text::decode_checked(&fs::read(p).unwrap_or_default());
+    if lossy {
+        return Err(format!(
+            "{} contains bytes that aren't valid {}. Saving would damage them, so it was not saved.",
+            p.display(),
+            enc.label()
+        ));
+    }
+    let new_text = new_text.replace("\r\n", "\n");
+    let body = if old.contains("\r\n") {
+        new_text.replace('\n', "\r\n")
+    } else {
+        new_text
+    };
+    let (bytes, note) = match text::encode(&body, enc) {
+        Some(b) => (b, None),
+        None => (
+            body.into_bytes(),
+            Some(format!(
+                "Saved as UTF-8: the text has characters {} can't store",
+                enc.label()
+            )),
+        ),
+    };
+    fs::write(p, bytes).map_err(|e| format!("{}: {e}", p.display()))?;
+    Ok(note)
 }
 
 /// Whether a link target is a URL the OS may open (web or mail only).
@@ -288,6 +452,49 @@ mod tests {
     }
 
     #[test]
+    fn save_keeps_line_endings_and_refuses_non_markdown() {
+        let dir = std::env::temp_dir().join(format!("mdview-save-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let crlf = dir.join("crlf.md");
+        fs::write(&crlf, "a\r\nb\r\n").unwrap();
+        save_file(&crlf, "x\ny\n").unwrap();
+        assert_eq!(fs::read_to_string(&crlf).unwrap(), "x\r\ny\r\n");
+
+        let lf = dir.join("lf.md");
+        fs::write(&lf, "a\n").unwrap();
+        save_file(&lf, "z\n").unwrap();
+        assert_eq!(fs::read_to_string(&lf).unwrap(), "z\n");
+
+        let txt = dir.join("notes.txt");
+        fs::write(&txt, "keep").unwrap();
+        assert!(save_file(&txt, "nope").is_err());
+        assert_eq!(fs::read_to_string(&txt).unwrap(), "keep");
+        assert!(save_file(&dir.join("missing.md"), "x").is_err());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn counts_markdown_recursively() {
+        let dir = std::env::temp_dir().join(format!("mdview-count-{}", std::process::id()));
+        fs::create_dir_all(dir.join("a/b")).unwrap();
+        fs::create_dir_all(dir.join(".hidden")).unwrap();
+        fs::create_dir_all(dir.join("empty")).unwrap();
+        for f in [
+            "x.md",
+            "a/y.markdown",
+            "a/b/z.md",
+            "a/notes.txt",
+            ".hidden/h.md",
+        ] {
+            fs::write(dir.join(f), "#").unwrap();
+        }
+        assert_eq!(count_markdown(&dir, &mut 1000), (3, true));
+        assert_eq!(count_markdown(&dir.join("empty"), &mut 1000), (0, true));
+        assert!(!count_markdown(&dir, &mut 2).1);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn open_policies() {
         assert!(is_web_url("https://example.com"));
         assert!(is_web_url("MAILTO:a@b.c"));
@@ -297,6 +504,41 @@ mod tests {
         assert!(!is_safe_to_open(Path::new("/a/setup.exe")));
         assert!(!is_safe_to_open(Path::new("/a/run.sh")));
         assert!(!is_safe_to_open(Path::new("/a/noext")));
+    }
+
+    #[test]
+    fn resolves_site_root_paths() {
+        let dir = std::env::temp_dir().join(format!("mdview-site-{}", std::process::id()));
+        fs::create_dir_all(dir.join("static/uploads")).unwrap();
+        fs::create_dir_all(dir.join("content/posts")).unwrap();
+        fs::write(dir.join("static/uploads/a.png"), "x").unwrap();
+        let post = dir.join("content/posts/p.md");
+        fs::write(&post, "x").unwrap();
+        let found = resolve_path(&post.to_string_lossy(), "/uploads/a.png");
+        assert_eq!(found, dir.join("static/uploads/a.png"));
+        // Real absolute paths still win.
+        let abs = dir.join("content/posts/p.md");
+        assert_eq!(resolve_path("/elsewhere/x.md", &abs.to_string_lossy()), abs);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn save_keeps_encoding() {
+        let dir = std::env::temp_dir().join(format!("mdview-enc-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("old.md");
+        fs::write(&f, b"caf\xe9\r\n").unwrap();
+        assert_eq!(save_file(&f, "café crème\n").unwrap(), None);
+        assert_eq!(fs::read(&f).unwrap(), b"caf\xe9 cr\xe8me\r\n");
+        // Characters Windows-1252 can't hold fall back to UTF-8, with a note.
+        assert!(save_file(&f, "emoji 😀\n").unwrap().is_some());
+        assert_eq!(fs::read_to_string(&f).unwrap(), "emoji 😀\r\n");
+        // A UTF-8 file with a damaged byte is left alone rather than rewritten.
+        let damaged = b"caf\xc3\xa9 \x92s\n";
+        fs::write(&f, damaged).unwrap();
+        assert!(save_file(&f, "anything\n").is_err());
+        assert_eq!(fs::read(&f).unwrap(), damaged);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

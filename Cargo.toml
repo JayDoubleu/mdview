@@ -1,6 +1,6 @@
 [package]
 name = "mdview"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 description = "A lightweight, cross-platform Markdown viewer with GitHub flavoured rendering, a file tree and a source pane"

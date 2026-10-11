@@ -4,14 +4,17 @@
     windows_subsystem = "windows"
 )]
 
+mod annotations;
 mod render;
 mod server;
+mod text;
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde_json::{Value, json};
 use server::Launch;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tao::dpi::LogicalSize;
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
@@ -39,9 +42,16 @@ KEYS (Cmd on macOS):
 
 enum UserEvent {
     Title(String),
-    Watch(PathBuf),
+    Watch(Vec<PathBuf>),
     FsChanged(Vec<PathBuf>),
     Dropped(Vec<PathBuf>),
+    /// The page has (or no longer has) unsaved edits.
+    Dirty(bool),
+    /// Answer to a request from the page, delivered to `mdview.reply`.
+    Reply(Value),
+    /// Close the window, asking the page first if there are unsaved edits.
+    CloseRequested,
+    CloseAck,
     Quit,
 }
 
@@ -194,11 +204,17 @@ fn main() -> wry::Result<()> {
     let mut web_context = WebContext::new(dirs::data_local_dir().map(|d| d.join("mdview")));
 
     #[cfg(target_os = "macos")]
-    let _menu = macos_menu();
+    let _menu = macos_menu(proxy.clone());
 
     let builder = WebViewBuilder::new_with_web_context(&mut web_context)
-        .with_custom_protocol("mdview".into(), move |_id, req| {
-            server::handle(&proto_launch, req)
+        .with_asynchronous_custom_protocol("mdview".into(), move |_id, req, responder| {
+            // Folder counting walks directory trees; keep it off the UI thread.
+            if server::is_slow(&req) {
+                let launch = proto_launch.clone();
+                std::thread::spawn(move || responder.respond(server::handle(&launch, req)));
+            } else {
+                responder.respond(server::handle(&proto_launch, req));
+            }
         })
         .with_url(format!("{origin}/"))
         .with_devtools(cfg!(debug_assertions))
@@ -241,7 +257,11 @@ fn main() -> wry::Result<()> {
     };
 
     let mut watcher = make_watcher(proxy.clone());
-    let mut watched: Option<PathBuf> = None;
+    // Folders shown in the tree plus the open file's folder.
+    let mut watched: Vec<PathBuf> = Vec::new();
+
+    let mut dirty = false;
+    let mut close_asked: Option<(Instant, bool)> = None;
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -250,18 +270,45 @@ fn main() -> wry::Result<()> {
                 event: WindowEvent::CloseRequested,
                 ..
             }
-            | Event::UserEvent(UserEvent::Quit) => {
-                *control_flow = ControlFlow::Exit;
+            | Event::UserEvent(UserEvent::CloseRequested) => {
+                // With unsaved edits the page asks first and replies with Quit.
+                // If it never even acknowledged the last request (it hung),
+                // closing again quits anyway.
+                let hung = close_asked.is_some_and(|(t, acked): (Instant, bool)| {
+                    !acked && t.elapsed() > Duration::from_secs(2)
+                });
+                if dirty && !hung {
+                    send_js(&webview, "requestClose", Value::Null);
+                    close_asked = Some((Instant::now(), false));
+                } else {
+                    *control_flow = ControlFlow::Exit;
+                }
             }
+            Event::UserEvent(UserEvent::CloseAck) => {
+                if let Some((_, acked)) = close_asked.as_mut() {
+                    *acked = true;
+                }
+            }
+            Event::UserEvent(UserEvent::Quit) => *control_flow = ControlFlow::Exit,
+            Event::UserEvent(UserEvent::Dirty(d)) => dirty = d,
+            Event::UserEvent(UserEvent::Reply(v)) => send_js(&webview, "reply", v),
             Event::UserEvent(UserEvent::Title(t)) => window.set_title(&t),
-            Event::UserEvent(UserEvent::Watch(dir)) => {
+            Event::UserEvent(UserEvent::Watch(dirs)) => {
                 if let Some(w) = watcher.as_mut() {
-                    if watched.as_ref() != Some(&dir) {
-                        if let Some(old) = watched.take() {
-                            let _ = w.unwatch(&old);
+                    watched.retain(|d| {
+                        // A deleted folder lost its watch; drop it so it is
+                        // watched again if it comes back.
+                        let keep = dirs.contains(d) && d.is_dir();
+                        if !keep {
+                            let _ = w.unwatch(d);
                         }
-                        if w.watch(&dir, RecursiveMode::NonRecursive).is_ok() {
-                            watched = Some(dir);
+                        keep
+                    });
+                    for dir in dirs {
+                        if !watched.contains(&dir)
+                            && w.watch(&dir, RecursiveMode::NonRecursive).is_ok()
+                        {
+                            watched.push(dir);
                         }
                     }
                 }
@@ -304,8 +351,22 @@ fn tune_webkitgtk(webview: &wry::WebView) {
 
 /// macOS needs an application menu for standard shortcuts (Cmd+C, Cmd+A, Cmd+Q...) to work.
 #[cfg(target_os = "macos")]
-fn macos_menu() -> muda::Menu {
-    use muda::{Menu, PredefinedMenuItem as P, Submenu};
+fn macos_menu(proxy: EventLoopProxy<UserEvent>) -> muda::Menu {
+    use muda::accelerator::{Accelerator, Code, Modifiers};
+    use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem as P, Submenu};
+    // A custom Quit (instead of the predefined one, which terminates at once)
+    // so unsaved edits get the same prompt as closing the window.
+    let quit = MenuItem::with_id(
+        "quit",
+        "Quit mdview",
+        true,
+        Some(Accelerator::new(Modifiers::META, Code::KeyQ)),
+    );
+    MenuEvent::set_event_handler(Some(move |e: MenuEvent| {
+        if e.id == "quit" {
+            let _ = proxy.send_event(UserEvent::CloseRequested);
+        }
+    }));
     let app = Submenu::with_items(
         "mdview",
         true,
@@ -316,7 +377,7 @@ fn macos_menu() -> muda::Menu {
             &P::hide_others(None),
             &P::show_all(None),
             &P::separator(),
-            &P::quit(None),
+            &quit,
         ],
     )
     .expect("menu");
@@ -365,7 +426,13 @@ fn handle_ipc(proxy: &EventLoopProxy<UserEvent>, body: &str) {
             let _ = proxy.send_event(UserEvent::Title(arg.to_string()));
         }
         Some("watch") => {
-            let _ = proxy.send_event(UserEvent::Watch(PathBuf::from(arg)));
+            let dirs: Vec<PathBuf> = serde_json::from_str::<Vec<String>>(arg)
+                .unwrap_or_default()
+                .into_iter()
+                .take(MAX_WATCHED)
+                .map(PathBuf::from)
+                .collect();
+            let _ = proxy.send_event(UserEvent::Watch(dirs));
         }
         // Links in documents: web and mail URLs only.
         Some("open_url") if server::is_web_url(arg) => {
@@ -385,12 +452,47 @@ fn handle_ipc(proxy: &EventLoopProxy<UserEvent>, body: &str) {
         Some("open_path") if Path::new(arg).exists() => {
             let _ = open::that_detached(arg);
         }
+        Some("close") => {
+            let _ = proxy.send_event(UserEvent::CloseRequested);
+        }
+        Some("close_ack") => {
+            let _ = proxy.send_event(UserEvent::CloseAck);
+        }
         Some("quit") => {
             let _ = proxy.send_event(UserEvent::Quit);
+        }
+        Some("dirty") => {
+            let _ = proxy.send_event(UserEvent::Dirty(arg == "1"));
+        }
+        // Edit mode: render the unsaved buffer for the live preview.
+        Some("render_text") => {
+            let html = render::markdown(arg);
+            reply(proxy, &msg, json!({ "html": html }));
+        }
+        Some("save") => {
+            let path = msg.get("path").and_then(Value::as_str).unwrap_or("");
+            let saved = if server::is_editable(Path::new(path)) {
+                server::save_file(Path::new(path), arg)
+            } else {
+                Err("That file isn't open for editing".into())
+            };
+            let result = match saved {
+                Ok(note) => json!({ "ok": true, "note": note }),
+                Err(e) => json!({ "ok": false, "error": e }),
+            };
+            reply(proxy, &msg, result);
         }
         _ => {}
     }
 }
+
+fn reply(proxy: &EventLoopProxy<UserEvent>, msg: &Value, data: Value) {
+    let id = msg.get("id").cloned().unwrap_or(Value::Null);
+    let _ = proxy.send_event(UserEvent::Reply(json!({ "id": id, "data": data })));
+}
+
+/// Expanding many folders shouldn't exhaust the OS's watch handles.
+const MAX_WATCHED: usize = 64;
 
 fn make_watcher(proxy: EventLoopProxy<UserEvent>) -> Option<RecommendedWatcher> {
     notify::recommended_watcher(move |res: notify::Result<notify::Event>| {

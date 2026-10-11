@@ -21,7 +21,7 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 fn main() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
+    let root = Path::new(&env::var("CARGO_MANIFEST_DIR").unwrap()).join("assets");
     println!("cargo:rerun-if-changed=assets");
 
     let mut files = Vec::new();

@@ -1,10 +1,11 @@
 //! Markdown -> HTML rendering (GitHub flavoured) and syntax-highlighted source view.
 
-use comrak::adapters::CodefenceRendererAdapter;
-use comrak::nodes::Sourcepos;
+use comrak::adapters::{CodefenceRendererAdapter, SyntaxHighlighterAdapter};
+use comrak::nodes::{AstNode, NodeValue, Sourcepos};
 use comrak::plugins::syntect::{SyntectAdapter, SyntectAdapterBuilder};
-use comrak::{Options, markdown_to_html_with_plugins, options::Plugins};
-use std::collections::HashSet;
+use comrak::{Arena, Options, format_html_with_plugins, options::Plugins, parse_document};
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::OnceLock;
 use syntect::highlighting::ThemeSet;
@@ -19,16 +20,18 @@ const CLASS_STYLE: ClassStyle = ClassStyle::SpacedPrefixed {
 };
 
 struct Engine {
-    adapter: SyntectAdapter,
+    adapter: Highlighter,
     syntaxes: SyntaxSet,
 }
 
 fn engine() -> &'static Engine {
     static ENGINE: OnceLock<Engine> = OnceLock::new();
     ENGINE.get_or_init(|| Engine {
-        adapter: SyntectAdapterBuilder::new()
-            .css_with_class_prefix(CLASS_PREFIX)
-            .build(),
+        adapter: Highlighter(
+            SyntectAdapterBuilder::new()
+                .css_with_class_prefix(CLASS_PREFIX)
+                .build(),
+        ),
         syntaxes: SyntaxSet::load_defaults_newlines(),
     })
 }
@@ -55,6 +58,43 @@ fn options() -> Options<'static> {
     o.render.sourcepos = true;
     o.render.tasklist_classes = true;
     o
+}
+
+/// Syntect highlighting that keeps the `<pre>`'s `data-sourcepos` and `lang`
+/// (the stock adapter drops them), so code blocks map back to source lines.
+struct Highlighter(SyntectAdapter);
+
+impl SyntaxHighlighterAdapter for Highlighter {
+    fn write_highlighted(
+        &self,
+        output: &mut dyn fmt::Write,
+        lang: Option<&str>,
+        code: &str,
+    ) -> fmt::Result {
+        self.0.write_highlighted(output, lang, code)
+    }
+
+    fn write_pre_tag(
+        &self,
+        output: &mut dyn fmt::Write,
+        mut attributes: HashMap<&'static str, Cow<'_, str>>,
+    ) -> fmt::Result {
+        let mut attrs = vec![("class", Cow::Borrowed("syntax-highlighting"))];
+        for key in ["lang", "data-sourcepos"] {
+            if let Some(v) = attributes.remove(key) {
+                attrs.push((key, v));
+            }
+        }
+        comrak::html::write_opening_tag(output, "pre", attrs)
+    }
+
+    fn write_code_tag(
+        &self,
+        output: &mut dyn fmt::Write,
+        attributes: HashMap<&'static str, Cow<'_, str>>,
+    ) -> fmt::Result {
+        self.0.write_code_tag(output, attributes)
+    }
 }
 
 /// Leaves mermaid diagrams as escaped source for the frontend to render.
@@ -92,29 +132,168 @@ pub fn markdown(src: &str) -> String {
         .render
         .codefence_renderers
         .insert("mermaid".into(), &Mermaid);
-    sanitizer()
-        .clean(&markdown_to_html_with_plugins(src, &opts, &plugins))
-        .to_string()
+    let arena = Arena::new();
+    // TOML front matter (Hugo's +++) is parsed with its delimiters swapped for
+    // ---, so comrak treats it like YAML front matter; kept only if it does.
+    let toml_src = front_matter(src)
+        .filter(|f| f.toml)
+        .map(|f| toml_as_yaml(src, f.last_line));
+    let (root, toml) = match toml_src
+        .as_deref()
+        .map(|t| parse_document(&arena, t, &opts))
+        .filter(|r| front_matter_node(r).is_some())
+    {
+        Some(r) => (r, true),
+        None => (parse_document(&arena, src, &opts), false),
+    };
+    // comrak drops front matter from the HTML; show it as a collapsible panel
+    // instead. Line numbers come from comrak, so they always agree with it.
+    let mut html = front_matter_node(root)
+        .map(|last_line| front_matter_html(src, last_line, toml))
+        .unwrap_or_default();
+    crate::annotations::mark_cards(root);
+    format_html_with_plugins(root, &opts, &mut html, &plugins).expect("formatting to a String");
+    sanitizer().clean(&html).to_string()
+}
+
+/// Last line of the front matter comrak found, if any.
+fn front_matter_node<'a>(root: &'a AstNode<'a>) -> Option<usize> {
+    let first = root.first_child()?;
+    let data = first.data.borrow();
+    matches!(data.value, NodeValue::FrontMatter(_)).then_some(data.sourcepos.end.line)
+}
+
+fn toml_as_yaml(src: &str, last_line: usize) -> String {
+    src.split_inclusive('\n')
+        .enumerate()
+        .map(|(i, l)| {
+            if i == 0 || i + 1 == last_line {
+                if l.ends_with("\r\n") {
+                    "---\r\n"
+                } else {
+                    "---\n"
+                }
+            } else {
+                l
+            }
+        })
+        .collect()
+}
+
+struct FrontMatter {
+    last_line: usize,
+    toml: bool,
+}
+
+/// A leading `---` or `+++` block. Only used to spot TOML front matter; comrak
+/// decides what really counts as front matter.
+fn front_matter(src: &str) -> Option<FrontMatter> {
+    let mut lines = src.split_inclusive('\n');
+    let (delim, toml) = match lines.next()?.trim_end() {
+        "---" => ("---", false),
+        "+++" => ("+++", true),
+        _ => return None,
+    };
+    lines
+        .position(|l| l.trim_end() == delim)
+        .map(|i| FrontMatter {
+            last_line: i + 2,
+            toml,
+        })
+}
+
+/// Top-level YAML keys: unindented `key:` lines.
+fn yaml_fields(yaml: &str) -> usize {
+    yaml.lines()
+        .filter(|l| {
+            l.chars()
+                .next()
+                .is_some_and(|c| !c.is_whitespace() && !"#-".contains(c))
+        })
+        .filter(|l| l.contains(':'))
+        .count()
+}
+
+/// Top-level TOML keys: `key =` lines before the first table, plus each table.
+fn toml_fields(toml: &str) -> usize {
+    let mut tables = std::collections::BTreeSet::new();
+    let mut keys = 0;
+    for line in toml.lines().map(str::trim) {
+        if let Some(name) = line.strip_prefix('[') {
+            tables.insert(
+                name.trim_matches(['[', ']'])
+                    .split('.')
+                    .next()
+                    .unwrap_or("")
+                    .trim(),
+            );
+        } else if tables.is_empty() && !line.starts_with('#') && line.contains('=') {
+            keys += 1;
+        }
+    }
+    keys + tables.len()
+}
+
+fn front_matter_html(src: &str, last_line: usize, toml: bool) -> String {
+    // The text between the delimiter lines.
+    let yaml: String = src
+        .trim_start_matches('\u{feff}')
+        .split_inclusive('\n')
+        .take(last_line.saturating_sub(1))
+        .skip(1)
+        .collect();
+    let yaml = yaml.as_str();
+    let fields = if toml {
+        toml_fields(yaml)
+    } else {
+        yaml_fields(yaml)
+    };
+    let e = engine();
+    let syntax = e
+        .syntaxes
+        .find_syntax_by_extension(if toml { "toml" } else { "yaml" })
+        .unwrap_or_else(|| e.syntaxes.find_syntax_plain_text());
+    let mut generator =
+        ClassedHTMLGenerator::new_with_class_style(syntax, &e.syntaxes, CLASS_STYLE);
+    let mut ok = true;
+    for line in LinesWithEndings::from(yaml) {
+        ok &= generator
+            .parse_html_for_line_which_includes_newline(line)
+            .is_ok();
+    }
+    let code = if ok {
+        generator.finalize()
+    } else {
+        html_escape(yaml)
+    };
+    let plural = if fields == 1 { "" } else { "s" };
+    format!(
+        "<details class=\"front-matter\" data-sourcepos=\"1:1-{last_line}:3\">\
+         <summary>Front matter <span class=\"fm-count\">{fields} field{plural}</span></summary>\
+         <pre class=\"syntax-highlighting\"><code>{code}</code></pre></details>\n"
+    )
 }
 
 fn sanitizer() -> &'static ammonia::Builder<'static> {
     static SANITIZER: OnceLock<ammonia::Builder<'static>> = OnceLock::new();
     SANITIZER.get_or_init(|| {
         let mut b = ammonia::Builder::default();
-        b.add_tags(["section", "input", "picture", "source", "video", "audio"])
-            .add_generic_attributes(["class", "id", "align", "dir", "aria-label", "aria-hidden"])
-            .generic_attribute_prefixes(HashSet::from(["data-"]))
-            .add_tag_attributes("a", ["name"])
-            .add_tag_attributes("img", ["loading"])
-            .add_tag_attributes("input", ["type", "checked", "disabled"])
-            .add_tag_attributes("source", ["src", "srcset", "type", "media"])
-            .add_tag_attributes(
-                "video",
-                ["src", "controls", "width", "height", "loop", "muted"],
-            )
-            .add_tag_attributes("audio", ["src", "controls", "loop"])
-            .url_schemes(HashSet::from(["http", "https", "mailto"]))
-            .link_rel(None);
+        b.add_tags([
+            "section", "aside", "input", "picture", "source", "video", "audio",
+        ])
+        .add_generic_attributes(["class", "id", "align", "dir", "aria-label", "aria-hidden"])
+        .generic_attribute_prefixes(HashSet::from(["data-"]))
+        .add_tag_attributes("a", ["name"])
+        .add_tag_attributes("img", ["loading"])
+        .add_tag_attributes("input", ["type", "checked", "disabled"])
+        .add_tag_attributes("source", ["src", "srcset", "type", "media"])
+        .add_tag_attributes(
+            "video",
+            ["src", "controls", "width", "height", "loop", "muted"],
+        )
+        .add_tag_attributes("audio", ["src", "controls", "loop"])
+        .url_schemes(HashSet::from(["http", "https", "mailto"]))
+        .link_rel(None);
         b
     })
 }
@@ -122,7 +301,9 @@ fn sanitizer() -> &'static ammonia::Builder<'static> {
 /// Highlights raw markdown source, returning one `<span class="line">` per source line
 /// so every row has the same height as the line-number gutter.
 pub fn source(src: &str) -> String {
-    split_lines(&highlight_source(src))
+    // A lone \r would turn into an extra line break in the page.
+    let src = src.replace("\r\n", "\n");
+    split_lines(&highlight_source(&src))
 }
 
 fn highlight_source(src: &str) -> String {
@@ -266,6 +447,8 @@ mod tests {
         let html = markdown("```rust\nfn main() {}\n```\n");
         assert!(html.contains("class=\""), "{html}");
         assert!(html.contains("hl-source hl-rust"), "{html}");
+        // The preview maps code blocks back to their source lines.
+        assert!(html.contains("data-sourcepos=\"1:1-3:3\""), "{html}");
     }
 
     #[test]
@@ -322,6 +505,58 @@ mod tests {
         ] {
             assert!(html.contains(good), "{good} missing in {html}");
         }
+    }
+
+    #[test]
+    fn front_matter_is_shown_collapsed() {
+        let src = "---\ntitle: Hi\ntags:\n  - a\n---\n\n# Body\n";
+        let html = markdown(src);
+        assert!(
+            html.starts_with("<details class=\"front-matter\" data-sourcepos=\"1:1-5:3\">"),
+            "{html}"
+        );
+        assert!(html.contains("2 fields"), "{html}");
+        assert!(html.contains("title"), "{html}");
+        assert!(
+            html.contains("data-sourcepos=\"7:1-7:6\""),
+            "body keeps its line numbers: {html}"
+        );
+        assert!(!markdown("# No front matter\n").contains("class=\"front-matter\""));
+        assert!(!markdown("---\nnot closed\n").contains("class=\"front-matter\""));
+    }
+
+    #[test]
+    fn front_matter_panel_matches_comrak() {
+        // Not front matter for comrak, so no panel and nothing hidden.
+        for src in [
+            "---\ntitle: x\n...\nHIDDEN\n\n# Body\n",
+            "---   \ntitle: x\n---\n",
+        ] {
+            let html = markdown(src);
+            assert!(!html.contains("class=\"front-matter\""), "{src:?}: {html}");
+            assert!(html.contains("title: x"), "{src:?}: {html}");
+        }
+        // CRLF front matter is still recognised.
+        let html = markdown("---\r\ntitle: x\r\n---\r\n\r\n# Body\r\n");
+        assert!(
+            html.contains("class=\"front-matter\" data-sourcepos=\"1:1-3:3\""),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn toml_front_matter() {
+        let html = markdown("+++\ntitle = \"Hi\"\n[extra]\nx = 1\n+++\n\n# Body\n");
+        assert!(html.contains("data-sourcepos=\"1:1-5:3\""), "{html}");
+        assert!(html.contains("2 fields<"), "{html}");
+        assert!(html.contains("data-sourcepos=\"7:1-7:6\""), "{html}");
+        assert!(!html.contains("+++"), "{html}");
+    }
+
+    #[test]
+    fn bom_and_empty() {
+        assert!(markdown("").is_empty());
+        assert!(markdown("\u{feff}# T\n").contains("<h1"));
     }
 
     #[test]
