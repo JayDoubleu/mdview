@@ -502,6 +502,9 @@ body.resizing iframe, body.resizing #preview-pane, body.resizing #source-pane { 
   .markdown-body { padding: 20px 16px 64px; }
 }
 .source .code .line { display: block; height: calc(var(--line-h) * var(--zoom)); overflow: hidden; }
+/* Lines picked by a selection in the preview, with the exact text on top. */
+.source .code .line.picked { background: var(--cur-line); }
+::highlight(mdview-picked) { background-color: var(--selection); }
 
 /* ---------- edit mode ---------- */
 button.primary, button.danger, .modal button {
@@ -598,6 +601,20 @@ button.danger:hover { background: var(--caution); border-color: var(--caution); 
   tab-size: 4;
 }
 .editor::selection { background: var(--selection); }
+/* Text picked in the preview, drawn behind the (unfocused) textarea. */
+.editor-pick {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  padding: 12px 24px 12px 14px;
+  font: inherit;
+  line-height: inherit;
+  white-space: pre;
+  tab-size: 4;
+  color: transparent;
+  pointer-events: none;
+}
+.editor-pick mark { background: var(--selection); color: transparent; border-radius: 2px; }
 body.editing #source { display: none; }
 
 /* The block the editor cursor is in, mirrored in the preview. */

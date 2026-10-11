@@ -1,10 +1,11 @@
 //! Markdown -> HTML rendering (GitHub flavoured) and syntax-highlighted source view.
 
-use comrak::adapters::CodefenceRendererAdapter;
+use comrak::adapters::{CodefenceRendererAdapter, SyntaxHighlighterAdapter};
 use comrak::nodes::Sourcepos;
 use comrak::plugins::syntect::{SyntectAdapter, SyntectAdapterBuilder};
 use comrak::{Options, markdown_to_html_with_plugins, options::Plugins};
-use std::collections::HashSet;
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::OnceLock;
 use syntect::highlighting::ThemeSet;
@@ -19,16 +20,18 @@ const CLASS_STYLE: ClassStyle = ClassStyle::SpacedPrefixed {
 };
 
 struct Engine {
-    adapter: SyntectAdapter,
+    adapter: Highlighter,
     syntaxes: SyntaxSet,
 }
 
 fn engine() -> &'static Engine {
     static ENGINE: OnceLock<Engine> = OnceLock::new();
     ENGINE.get_or_init(|| Engine {
-        adapter: SyntectAdapterBuilder::new()
-            .css_with_class_prefix(CLASS_PREFIX)
-            .build(),
+        adapter: Highlighter(
+            SyntectAdapterBuilder::new()
+                .css_with_class_prefix(CLASS_PREFIX)
+                .build(),
+        ),
         syntaxes: SyntaxSet::load_defaults_newlines(),
     })
 }
@@ -55,6 +58,43 @@ fn options() -> Options<'static> {
     o.render.sourcepos = true;
     o.render.tasklist_classes = true;
     o
+}
+
+/// Syntect highlighting that keeps the `<pre>`'s `data-sourcepos` and `lang`
+/// (the stock adapter drops them), so code blocks map back to source lines.
+struct Highlighter(SyntectAdapter);
+
+impl SyntaxHighlighterAdapter for Highlighter {
+    fn write_highlighted(
+        &self,
+        output: &mut dyn fmt::Write,
+        lang: Option<&str>,
+        code: &str,
+    ) -> fmt::Result {
+        self.0.write_highlighted(output, lang, code)
+    }
+
+    fn write_pre_tag(
+        &self,
+        output: &mut dyn fmt::Write,
+        mut attributes: HashMap<&'static str, Cow<'_, str>>,
+    ) -> fmt::Result {
+        let mut attrs = vec![("class", Cow::Borrowed("syntax-highlighting"))];
+        for key in ["lang", "data-sourcepos"] {
+            if let Some(v) = attributes.remove(key) {
+                attrs.push((key, v));
+            }
+        }
+        comrak::html::write_opening_tag(output, "pre", attrs)
+    }
+
+    fn write_code_tag(
+        &self,
+        output: &mut dyn fmt::Write,
+        attributes: HashMap<&'static str, Cow<'_, str>>,
+    ) -> fmt::Result {
+        self.0.write_code_tag(output, attributes)
+    }
 }
 
 /// Leaves mermaid diagrams as escaped source for the frontend to render.
@@ -388,6 +428,8 @@ mod tests {
         let html = markdown("```rust\nfn main() {}\n```\n");
         assert!(html.contains("class=\""), "{html}");
         assert!(html.contains("hl-source hl-rust"), "{html}");
+        // The preview maps code blocks back to their source lines.
+        assert!(html.contains("data-sourcepos=\"1:1-3:3\""), "{html}");
     }
 
     #[test]

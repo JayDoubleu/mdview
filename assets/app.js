@@ -858,6 +858,166 @@
     sourceMarked = true;
   }
 
+  // ---- preview → source: selecting text in the preview selects it in the
+  // editor (edit mode) or highlights it in the source pane (view mode) ----
+  const FULL_POS = /^(\d+):(\d+)-(\d+):(\d+)/;
+
+  // Character index of 1-based line `line`, byte column `col` (comrak counts
+  // UTF-8 bytes) in `text`.
+  function textOffset(text, line, col) {
+    let i = 0;
+    for (let n = 1; n < line && i !== -1; n++) i = text.indexOf("\n", i) + 1 || -1;
+    if (i < 0) return text.length;
+    let bytes = 0;
+    while (i < text.length && text[i] !== "\n" && bytes < col - 1) {
+      const c = text.codePointAt(i);
+      bytes += c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4;
+      i += c > 0xffff ? 2 : 1;
+    }
+    return i;
+  }
+
+  // Walks the rendered text through the source: every visible character is
+  // looked for in order, skipping Markdown syntax (`**`, `[..](url)`, `&amp;`)
+  // in between. Whitespace is ignored since rendering reflows it.
+  function followText(rendered, text, from, to) {
+    let k = from;
+    for (const ch of rendered) {
+      if (/\s/.test(ch)) continue;
+      const j = text.indexOf(ch, k);
+      if (j === -1 || j >= to) return to;
+      k = j + ch.length;
+    }
+    if (/\s$/.test(rendered)) while (k < to && /[ \t]/.test(text[k])) k++;
+    return k;
+  }
+
+  // Source offset of a DOM point inside the preview, or -1.
+  function previewPointToOffset(text, node, offset, isEnd) {
+    // A point between blocks: use the start of the next / end of the previous.
+    if (node.nodeType === 1 && node.childNodes.length && !node.closest("[data-sourcepos]")) {
+      const kids = node.childNodes;
+      let n = isEnd ? kids[offset - 1] : kids[offset];
+      while (n && !(n.nodeType === 1 && n.matches("[data-sourcepos]"))) {
+        n = isEnd ? n.previousSibling : n.nextSibling;
+      }
+      if (!n) return -1;
+      const m = FULL_POS.exec(n.dataset.sourcepos);
+      return isEnd ? Math.min(text.length, textOffset(text, +m[3], +m[4]) + 1) : textOffset(text, +m[1], +m[2]);
+    }
+    const start = (node.nodeType === 1 ? node : node.parentElement)?.closest("[data-sourcepos]");
+    if (!start || !preview.contains(start)) return -1;
+    const m = FULL_POS.exec(start.dataset.sourcepos);
+    if (!m) return -1;
+    let from = textOffset(text, +m[1], +m[2]);
+    const to = Math.min(text.length, textOffset(text, +m[3], +m[4]) + 1);
+    let root = start;
+    // Code blocks and front matter: skip the fence line, ignore the summary.
+    const pre = (node.nodeType === 1 ? node : node.parentElement).closest("pre");
+    if (pre && start.contains(pre)) {
+      root = pre;
+      if (/^(```|~~~|---|\+\+\+)/.test(text.slice(from, from + 3))) {
+        from = text.indexOf("\n", from) + 1 || to;
+      }
+    } else if (start.matches(".front-matter")) {
+      return from;
+    }
+    const r = document.createRange();
+    r.setStart(root, 0);
+    try { r.setEnd(node, offset); } catch { return from; }
+    return followText(r.toString(), text, from, to);
+  }
+
+  function previewSelectionRange(text) {
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount) return null;
+    const range = sel.getRangeAt(0);
+    if (!preview.contains(range.commonAncestorContainer)) return null;
+    // A re-render resets the selection to the top; that's not a user pick.
+    if (range.collapsed && range.startContainer === preview) return null;
+    let s = previewPointToOffset(text, range.startContainer, range.startOffset, false);
+    let e = range.collapsed ? s : previewPointToOffset(text, range.endContainer, range.endOffset, true);
+    if (s < 0 && e < 0) return null;
+    if (s < 0) s = e;
+    if (e < 0) e = s;
+    return s <= e ? [s, e] : [e, s];
+  }
+
+  // An unfocused textarea doesn't paint its selection, so mirror it.
+  const editorPick = $("#editor-pick");
+  function showEditorPick(s, e) {
+    if (s === e) return hideEditorPick();
+    const v = editor.value;
+    editorPick.replaceChildren(v.slice(0, s), el("mark", "", v.slice(s, e)));
+    editorPick.hidden = false;
+  }
+  function hideEditorPick() {
+    if (!editorPick.hidden) editorPick.hidden = true;
+  }
+
+  let sourceHl = false;
+  function clearSourceHighlight() {
+    hideEditorPick();
+    if (!sourceHl) return;
+    sourceHl = false;
+    for (const n of document.querySelectorAll("#source-code .line.picked")) n.classList.remove("picked");
+    if (window.CSS?.highlights) CSS.highlights.delete("mdview-picked");
+  }
+
+  // DOM point for a character index in the read-only source pane.
+  function sourcePoint(lines, line, col) {
+    const walker = document.createTreeWalker(lines[line - 1], NodeFilter.SHOW_TEXT);
+    let last = null;
+    for (let t = walker.nextNode(); t; t = walker.nextNode()) {
+      if (col <= t.length) return [t, col];
+      col -= t.length;
+      last = t;
+    }
+    return last ? [last, last.length] : [lines[line - 1], 0];
+  }
+
+  function revealSourceLine(line) {
+    const lh = parseFloat(getComputedStyle(S.editing ? editor : $("#source")).lineHeight) || 20;
+    const y = sourcePad + (line - 1) * lh;
+    if (y < sourcePane.scrollTop + lh || y > sourcePane.scrollTop + sourcePane.clientHeight - 2 * lh) {
+      sourcePane.scrollTop = Math.max(0, y - sourcePane.clientHeight / 3);
+    }
+  }
+
+  function syncPreviewSelection() {
+    if (S.editing) {
+      const r = previewSelectionRange(editor.value);
+      if (!r) return;
+      if (editor.selectionStart === r[0] && editor.selectionEnd === r[1]) return;
+      editor.setSelectionRange(r[0], r[1]);
+      showEditorPick(r[0], r[1]);
+      updateCursor(true);
+      revealSourceLine(lineAt(editor.value, r[0]));
+      return;
+    }
+    if (!S.showSource) return;
+    const code = $("#source-code");
+    const lines = code.children;
+    const r = previewSelectionRange(code.textContent);
+    const sel = window.getSelection();
+    clearSourceHighlight();
+    if (!r || !lines.length || sel.isCollapsed) return;
+    const text = code.textContent;
+    const a = lineAt(text, r[0]);
+    let b = lineAt(text, r[1]);
+    if (b > a && text[r[1] - 1] === "\n") b--;
+    for (let i = a; i <= b; i++) lines[i - 1]?.classList.add("picked");
+    sourceHl = true;
+    if (window.CSS?.highlights && window.Highlight) {
+      const col = (pos) => pos - (text.lastIndexOf("\n", pos - 1) + 1);
+      const hl = document.createRange();
+      hl.setStart(...sourcePoint(lines, a, col(r[0])));
+      hl.setEnd(...sourcePoint(lines, lineAt(text, r[1]), col(r[1])));
+      CSS.highlights.set("mdview-picked", new Highlight(hl));
+    }
+    revealSourceLine(a);
+  }
+
   async function loadEditor(keepScroll = false) {
     const scroll = sourcePane.scrollTop;
     try {
@@ -903,6 +1063,7 @@
     $("#editor-wrap").hidden = true;
     $("#btn-discard").hidden = true;
     clearCursorBlock();
+    hideEditorPick();
     editor.value = "";
     document.body.classList.remove("editing");
     $("#btn-edit").classList.remove("on");
@@ -1068,12 +1229,20 @@
   for (const ev of ["keyup", "click", "select", "focus"]) editor.addEventListener(ev, scheduleCursor);
   document.addEventListener("selectionchange", () => {
     if (document.activeElement === editor) return scheduleCursor();
-    if (S.editing || sourceRaf) return;
-    sourceRaf = requestAnimationFrame(() => { sourceRaf = 0; updateSourceSelection(); });
+    if (sourceRaf) return;
+    sourceRaf = requestAnimationFrame(() => {
+      sourceRaf = 0;
+      const sel = window.getSelection();
+      const node = sel && sel.rangeCount ? sel.getRangeAt(0).commonAncestorContainer : null;
+      if (node && preview.contains(node)) return syncPreviewSelection();
+      clearSourceHighlight();
+      if (!S.editing) updateSourceSelection();
+    });
   });
   // While typing, the preview follows the editor.
   editor.addEventListener("keydown", () => (driver = "source"));
-  editor.addEventListener("focus", () => (driver = "source"));
+  editor.addEventListener("focus", () => { driver = "source"; hideEditorPick(); });
+  editor.addEventListener("input", hideEditorPick);
   editor.addEventListener("keydown", (e) => {
     if (e.key === "Tab" && !e.ctrlKey && !e.metaKey && !e.altKey) {
       e.preventDefault();

@@ -5,6 +5,8 @@
 - Basic editing: an Edit button unlocks the file in a plain text editor with a live preview. Changes are only written on Save (Ctrl/Cmd+S), unsaved state is shown in the toolbar, over the preview and in the window title, and locking, switching files or closing with unsaved changes asks before discarding them. Line endings (LF or CRLF) are preserved on save.
 - Editor polish: line numbers, a highlighted cursor line (or selected lines), and a Discard button with Undo.
 - The preview highlights the blocks for the cursor line or selection, in the editor and in the read-only source pane.
+- Selection works both ways: selecting text in the preview selects the matching Markdown in the editor, or highlights it in the source pane.
+- Highlighted code blocks keep their source position, so they take part in scroll sync and cursor highlighting.
 - YAML front matter is shown as a collapsible panel at the top of the preview (it used to be hidden), and opens when the cursor or selection is inside it.
 - TOML front matter (`+++`, Hugo) is shown in the same panel instead of as stray text.
 - Site-root links and images such as `/uploads/a.png` resolve against the site folder (or its `static/` / `public/` folder), as static site generators do.
