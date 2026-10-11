@@ -39,7 +39,9 @@ We will ship the **new parser** next week, after the security review is done.
 
 A selection over several lines is quoted with `> ` lines. To hand the notes to an agent, save the file and ask something like:
 
-> Work through every `<!-- ANNOTATION -->` comment in docs/plan.md. Apply each note to the selected text, then delete the comment.
+> Find the annotations in docs/plan.md with `grep -n "<!-- ANNOTATION" docs/plan.md`, read only the lines around each one, apply each note to the selected text, then delete the comment. Work from the bottom of the file up so line numbers stay valid.
+
+On a long document this saves the agent from reading the whole file. Resolving a note is just deleting its comment, so nothing else needs to be kept in sync.
 
 ## Install
 
