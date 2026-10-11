@@ -92,44 +92,111 @@ pub fn markdown(src: &str) -> String {
         .render
         .codefence_renderers
         .insert("mermaid".into(), &Mermaid);
-    // comrak skips front matter (keeping line numbers intact); show it as a
-    // collapsible panel at the top instead of dropping it silently.
-    let mut html = front_matter(src).map(front_matter_html).unwrap_or_default();
-    html.push_str(&markdown_to_html_with_plugins(src, &opts, &plugins));
+    // comrak skips YAML front matter (keeping line numbers intact); show it as
+    // a collapsible panel at the top instead of dropping it silently. TOML
+    // front matter (Hugo's +++) gets the same treatment: its delimiters are
+    // swapped for --- so comrak skips it too.
+    let fm = front_matter(src);
+    let toml_src;
+    let body_src = match &fm {
+        Some(f) if f.toml => {
+            toml_src = src
+                .split_inclusive('\n')
+                .enumerate()
+                .map(|(i, l)| {
+                    if i == 0 || i + 1 == f.last_line {
+                        "---\n"
+                    } else {
+                        l
+                    }
+                })
+                .collect::<String>();
+            toml_src.as_str()
+        }
+        _ => src,
+    };
+    let mut html = fm.map(front_matter_html).unwrap_or_default();
+    html.push_str(&markdown_to_html_with_plugins(body_src, &opts, &plugins));
     sanitizer().clean(&html).to_string()
 }
 
-/// A leading `---` ... `---` (or `...`) YAML block: its text and last line number.
-fn front_matter(src: &str) -> Option<(&str, usize)> {
+struct FrontMatter<'a> {
+    text: &'a str,
+    last_line: usize,
+    toml: bool,
+}
+
+/// A leading `---` YAML (closed by `---` or `...`) or `+++` TOML block.
+fn front_matter(src: &str) -> Option<FrontMatter<'_>> {
     let mut lines = src.split_inclusive('\n');
-    if lines.next()?.trim_end() != "---" {
-        return None;
-    }
+    let toml = match lines.next()?.trim_end() {
+        "---" => false,
+        "+++" => true,
+        _ => return None,
+    };
     let start = src.find('\n')? + 1;
     let mut offset = start;
     for (i, line) in lines.enumerate() {
-        if matches!(line.trim_end(), "---" | "...") {
-            return Some((&src[start..offset], i + 2));
+        let end = line.trim_end();
+        if (toml && end == "+++") || (!toml && matches!(end, "---" | "...")) {
+            return Some(FrontMatter {
+                text: &src[start..offset],
+                last_line: i + 2,
+                toml,
+            });
         }
         offset += line.len();
     }
     None
 }
 
-fn front_matter_html((yaml, last_line): (&str, usize)) -> String {
-    let fields = yaml
-        .lines()
+/// Top-level YAML keys: unindented `key:` lines.
+fn yaml_fields(yaml: &str) -> usize {
+    yaml.lines()
         .filter(|l| {
             l.chars()
                 .next()
-                .is_some_and(|c| !c.is_whitespace() && c != '#' && c != '-')
+                .is_some_and(|c| !c.is_whitespace() && !"#-".contains(c))
         })
         .filter(|l| l.contains(':'))
-        .count();
+        .count()
+}
+
+/// Top-level TOML keys: `key =` lines before the first table, plus each table.
+fn toml_fields(toml: &str) -> usize {
+    let mut tables = std::collections::BTreeSet::new();
+    let mut keys = 0;
+    for line in toml.lines().map(str::trim) {
+        if let Some(name) = line.strip_prefix('[') {
+            tables.insert(
+                name.trim_matches(['[', ']'])
+                    .split('.')
+                    .next()
+                    .unwrap_or("")
+                    .trim(),
+            );
+        } else if tables.is_empty() && !line.starts_with('#') && line.contains('=') {
+            keys += 1;
+        }
+    }
+    keys + tables.len()
+}
+
+fn front_matter_html(fm: FrontMatter) -> String {
+    let FrontMatter {
+        text: yaml,
+        last_line,
+        toml,
+    } = fm;
+    let fields = if toml {
+        toml_fields(yaml)
+    } else {
+        yaml_fields(yaml)
+    };
     let e = engine();
     let syntax = e
         .syntaxes
-        .find_syntax_by_extension("yaml")
+        .find_syntax_by_extension(if toml { "toml" } else { "yaml" })
         .unwrap_or_else(|| e.syntaxes.find_syntax_plain_text());
     let mut generator =
         ClassedHTMLGenerator::new_with_class_style(syntax, &e.syntaxes, CLASS_STYLE);
@@ -395,6 +462,21 @@ mod tests {
         );
         assert!(!markdown("# No front matter\n").contains("class=\"front-matter\""));
         assert!(!markdown("---\nnot closed\n").contains("class=\"front-matter\""));
+    }
+
+    #[test]
+    fn toml_front_matter() {
+        let html = markdown("+++\ntitle = \"Hi\"\n[extra]\nx = 1\n+++\n\n# Body\n");
+        assert!(html.contains("data-sourcepos=\"1:1-5:3\""), "{html}");
+        assert!(html.contains("2 fields<"), "{html}");
+        assert!(html.contains("data-sourcepos=\"7:1-7:6\""), "{html}");
+        assert!(!html.contains("+++"), "{html}");
+    }
+
+    #[test]
+    fn bom_and_empty() {
+        assert!(markdown("").is_empty());
+        assert!(markdown("\u{feff}# T\n").contains("<h1"));
     }
 
     #[test]

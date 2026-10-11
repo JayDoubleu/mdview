@@ -6,6 +6,10 @@
 - Editor polish: line numbers, a highlighted cursor line (or selected lines), and a Discard button with Undo.
 - The preview highlights the blocks for the cursor line or selection, in the editor and in the read-only source pane.
 - YAML front matter is shown as a collapsible panel at the top of the preview (it used to be hidden), and opens when the cursor or selection is inside it.
+- TOML front matter (`+++`, Hugo) is shown in the same panel instead of as stray text.
+- Site-root links and images such as `/uploads/a.png` resolve against the site folder (or its `static/` / `public/` folder), as static site generators do.
+- Files in Windows-1252, UTF-16 or UTF-8 with a BOM display correctly and are saved back in the same encoding (falling back to UTF-8, with a notice, only if the text no longer fits).
+- Empty files show a short note instead of a blank page; broken Mermaid diagrams show the parser error; slow loads show a "Rendering…" indicator.
 - File tree: each folder shows how many Markdown files it contains, including subfolders.
 
 ## 0.1.0

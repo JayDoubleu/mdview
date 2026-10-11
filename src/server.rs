@@ -2,6 +2,7 @@
 //! that the frontend uses to list directories, render files and load local images.
 
 use crate::render;
+use crate::text;
 use percent_encoding::percent_decode_str;
 use serde_json::{Value, json};
 use std::borrow::Cow;
@@ -53,8 +54,12 @@ pub fn handle(launch: &Launch, req: Request<Vec<u8>>) -> Resp {
         "/api/counts" => folder_counts(q("path").unwrap_or(".")),
         "/api/render" => render_file(q("path").unwrap_or("")),
         "/api/source" => source_file(q("path").unwrap_or("")),
-        "/api/raw" => read_text(q("path").unwrap_or(""))
-            .map(|(_, text)| respond("text/plain; charset=utf-8", Cow::Owned(text.into_bytes()))),
+        "/api/raw" => read_text_enc(q("path").unwrap_or("")).map(|(_, text, enc)| {
+            let mut r = respond("text/plain; charset=utf-8", Cow::Owned(text.into_bytes()));
+            r.headers_mut()
+                .insert("X-Mdview-Encoding", enc.label().parse().unwrap());
+            r
+        }),
         "/api/resolve" => Ok(json_resp(resolve(
             q("base").unwrap_or(""),
             q("rel").unwrap_or(""),
@@ -229,9 +234,15 @@ pub fn count_markdown(dir: &Path, mut budget: usize) -> (usize, bool) {
 }
 
 fn read_text(path: &str) -> Result<(PathBuf, String), (u16, String)> {
+    let (p, text, _) = read_text_enc(path)?;
+    Ok((p, text))
+}
+
+fn read_text_enc(path: &str) -> Result<(PathBuf, String, text::Encoding), (u16, String)> {
     let p = canon(Path::new(path));
     let bytes = fs::read(&p).map_err(|e| (404, format!("{}: {e}", p.display())))?;
-    Ok((p, String::from_utf8_lossy(&bytes).into_owned()))
+    let (text, enc) = text::decode(&bytes);
+    Ok((p, text, enc))
 }
 
 fn render_file(path: &str) -> Res {
@@ -260,15 +271,32 @@ fn resolve_path(base: &str, rel: &str) -> PathBuf {
     let rel = percent_decode_str(rel).decode_utf8_lossy();
     let rel = rel.strip_prefix("file://").unwrap_or(&rel);
     let rel_path = Path::new(rel);
-    if rel_path.is_absolute() {
-        return rel_path.to_path_buf();
-    }
     let base = Path::new(base);
     let dir = if base.is_dir() {
         base
     } else {
         base.parent().unwrap_or(base)
     };
+    if rel.starts_with(['/', '\\']) {
+        if rel_path.is_absolute() && rel_path.exists() {
+            return rel_path.to_path_buf();
+        }
+        // Static-site paths like /uploads/a.png are relative to the site root,
+        // which is an ancestor folder (or its static/ or public/ folder).
+        let trimmed = rel.trim_start_matches(['/', '\\']);
+        for ancestor in dir.ancestors() {
+            for sub in ["", "static", "public"] {
+                let candidate = ancestor.join(sub).join(trimmed);
+                if candidate.exists() {
+                    return candidate;
+                }
+            }
+        }
+        return rel_path.to_path_buf();
+    }
+    if rel_path.is_absolute() {
+        return rel_path.to_path_buf();
+    }
     dir.join(rel_path)
 }
 
@@ -302,21 +330,33 @@ fn local_file(base: &str, rel: &str) -> Res {
     Ok(resp)
 }
 
-/// Saves edited text over an existing Markdown file, keeping its line endings.
-/// Only Markdown files that already exist can be written.
-pub fn save_file(p: &Path, text: &str) -> Result<(), String> {
+/// Saves edited text over an existing Markdown file, keeping its line endings
+/// and encoding. Only Markdown files that already exist can be written.
+/// Returns a note for the user when the file couldn't be kept as it was.
+pub fn save_file(p: &Path, new_text: &str) -> Result<Option<String>, String> {
     let meta = fs::metadata(p).map_err(|e| format!("{}: {e}", p.display()))?;
     if !meta.is_file() || !is_markdown(p) {
         return Err(format!("{} is not a Markdown file", p.display()));
     }
-    let old = fs::read(p).unwrap_or_default();
-    let text = text.replace("\r\n", "\n");
-    let body = if old.windows(2).any(|w| w == b"\r\n") {
-        text.replace('\n', "\r\n")
+    let (old, enc) = text::decode(&fs::read(p).unwrap_or_default());
+    let new_text = new_text.replace("\r\n", "\n");
+    let body = if old.contains("\r\n") {
+        new_text.replace('\n', "\r\n")
     } else {
-        text
+        new_text
     };
-    fs::write(p, body).map_err(|e| format!("{}: {e}", p.display()))
+    let (bytes, note) = match text::encode(&body, enc) {
+        Some(b) => (b, None),
+        None => (
+            body.into_bytes(),
+            Some(format!(
+                "Saved as UTF-8: the text has characters {} can't store",
+                enc.label()
+            )),
+        ),
+    };
+    fs::write(p, bytes).map_err(|e| format!("{}: {e}", p.display()))?;
+    Ok(note)
 }
 
 /// Whether a link target is a URL the OS may open (web or mail only).
@@ -414,6 +454,36 @@ mod tests {
         assert!(!is_safe_to_open(Path::new("/a/setup.exe")));
         assert!(!is_safe_to_open(Path::new("/a/run.sh")));
         assert!(!is_safe_to_open(Path::new("/a/noext")));
+    }
+
+    #[test]
+    fn resolves_site_root_paths() {
+        let dir = std::env::temp_dir().join(format!("mdview-site-{}", std::process::id()));
+        fs::create_dir_all(dir.join("static/uploads")).unwrap();
+        fs::create_dir_all(dir.join("content/posts")).unwrap();
+        fs::write(dir.join("static/uploads/a.png"), "x").unwrap();
+        let post = dir.join("content/posts/p.md");
+        fs::write(&post, "x").unwrap();
+        let found = resolve_path(&post.to_string_lossy(), "/uploads/a.png");
+        assert_eq!(found, dir.join("static/uploads/a.png"));
+        // Real absolute paths still win.
+        let abs = dir.join("content/posts/p.md");
+        assert_eq!(resolve_path("/elsewhere/x.md", &abs.to_string_lossy()), abs);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn save_keeps_encoding() {
+        let dir = std::env::temp_dir().join(format!("mdview-enc-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("old.md");
+        fs::write(&f, b"caf\xe9\r\n").unwrap();
+        assert_eq!(save_file(&f, "café crème\n").unwrap(), None);
+        assert_eq!(fs::read(&f).unwrap(), b"caf\xe9 cr\xe8me\r\n");
+        // Characters Windows-1252 can't hold fall back to UTF-8, with a note.
+        assert!(save_file(&f, "emoji 😀\n").unwrap().is_some());
+        assert_eq!(fs::read_to_string(&f).unwrap(), "emoji 😀\r\n");
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

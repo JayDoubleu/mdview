@@ -6,6 +6,7 @@
 
 mod render;
 mod server;
+mod text;
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde_json::{Value, json};
@@ -438,7 +439,7 @@ fn handle_ipc(proxy: &EventLoopProxy<UserEvent>, body: &str) {
         Some("save") => {
             let path = msg.get("path").and_then(Value::as_str).unwrap_or("");
             let result = match server::save_file(Path::new(path), arg) {
-                Ok(()) => json!({ "ok": true }),
+                Ok(note) => json!({ "ok": true, "note": note }),
                 Err(e) => json!({ "ok": false, "error": e }),
             };
             reply(proxy, &msg, result);

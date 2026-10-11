@@ -355,9 +355,11 @@
     const { push = true, anchor = null, keepScroll = false } = opts;
     if (!(await confirmLeave())) return false;
     let doc;
+    const busy = setBusy();
     try {
       doc = await api("render", { path });
     } catch (e) {
+      busy();
       showState("Could not open file", String(e.message || e), true);
       return;
     }
@@ -372,7 +374,9 @@
     updateNav();
     preview.innerHTML = doc.html;
     S.previewIsBuffer = false;
+    if (!doc.html.trim() && !S.editing) showState("This file is empty", "Click Edit to start writing.");
     enhance();
+    busy();
     setDocPath(doc.path);
     S.docName = doc.name;
     updateDirtyUI();
@@ -389,6 +393,13 @@
     if (S.editing) await loadEditor(keepScroll);
     else if (S.showSource) await loadSource(keepScroll);
     return true;
+  }
+
+  // Shows a small "Rendering…" note when loading takes more than a moment.
+  // Returns the function that clears it.
+  function setBusy() {
+    const t = setTimeout(() => document.body.classList.add("busy"), 300);
+    return () => { clearTimeout(t); document.body.classList.remove("busy"); };
   }
 
   function updateNav() {
@@ -506,8 +517,10 @@
         div.dataset.done = "1";
         pre.replaceWith(div);
       } catch (e) {
-        pre.title = String(e.message || e);
         document.getElementById(`dmermaid-${mermaidSeq}`)?.remove();
+        const msg = String(e.message || e).split("\n").find((l) => l.trim()) || "invalid diagram";
+        const note = el("div", "render-error", `Mermaid diagram error: ${msg}`);
+        pre.after(note);
       }
     }
   }
@@ -554,6 +567,7 @@
     if (!S.file || S.sourceLoadedFor === S.file) return;
     S.sourceLoadedFor = S.file;
     const scroll = sourcePane.scrollTop;
+    const busy = setBusy();
     try {
       const src = await api("source", { path: S.file });
       $("#source-code").innerHTML = src.html;
@@ -564,6 +578,7 @@
       $("#source-code").textContent = String(e.message || e);
       $("#gutter").textContent = "";
     }
+    busy();
     if (keepScroll) sourcePane.scrollTop = scroll;
     else syncFromPreview();
   }
@@ -726,6 +741,7 @@
   async function readRaw(path) {
     const r = await fetch(`api/raw?${new URLSearchParams({ path })}`);
     if (!r.ok) throw new Error(await r.text());
+    S.encoding = r.headers.get("X-Mdview-Encoding") || "UTF-8";
     // Textareas use \n; compare and edit in that form.
     return (await r.text()).replace(/\r\n?/g, "\n");
   }
@@ -869,6 +885,9 @@
     $("#btn-edit").title = "Lock editing";
     applyLayout();
     await loadEditor();
+    if (S.encoding && S.encoding !== "UTF-8") {
+      showToast(`This file is ${S.encoding}. Saving keeps that encoding.`, false);
+    }
     editor.setSelectionRange(0, 0);
     editor.focus({ preventScroll: true });
     driver = "preview";
@@ -958,7 +977,7 @@
     }
     S.savedText = text;
     setDirty(editor.value !== S.savedText);
-    showToast("Saved", false);
+    showToast(res.note || "Saved", false);
     return true;
   }
 
