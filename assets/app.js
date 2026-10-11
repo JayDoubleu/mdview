@@ -706,9 +706,78 @@
     return (await r.text()).replace(/\r\n?/g, "\n");
   }
 
+  // The textarea grows to fit its text so the pane scrolls it together with
+  // the line numbers and the current-line band.
+  let lineCount = 0;
   function fitEditor() {
     editor.style.height = "auto";
     editor.style.height = editor.scrollHeight + "px";
+    editor.style.width = "100%";
+    if (editor.scrollWidth > editor.clientWidth) editor.style.width = editor.scrollWidth + "px";
+    const n = editor.value.split("\n").length;
+    if (n !== lineCount) {
+      lineCount = n;
+      let g = "";
+      for (let i = 1; i <= n; i++) g += `<span>${i}</span>\n`;
+      $("#editor-numbers").innerHTML = g;
+      curLine = 0;
+    }
+    updateCursor();
+  }
+
+  // ---- current line: a band in the editor, a soft tint on the preview block ----
+  let curLine = 0;
+  let cursorRaf = 0;
+  const BLOCKS = "p,li,h1,h2,h3,h4,h5,h6,pre,blockquote,tr,dt,dd,hr,table,.markdown-alert,.math-display,.mermaid";
+
+  function caretLine() {
+    const text = editor.value;
+    const end = editor.selectionStart;
+    let n = 1;
+    for (let i = text.indexOf("\n"); i !== -1 && i < end; i = text.indexOf("\n", i + 1)) n++;
+    return n;
+  }
+
+  function updateCursor(force = false) {
+    if (!S.editing) return;
+    const line = caretLine();
+    if (line === curLine && !force) return;
+    curLine = line;
+    const top = 12 + (line - 1) * (parseFloat(getComputedStyle(editor).lineHeight) || 20);
+    $("#editor-line").style.top = $("#gutter-line").style.top = top + "px";
+    const nums = $("#editor-numbers");
+    nums.querySelector(".cur")?.classList.remove("cur");
+    nums.children[line - 1]?.classList.add("cur");
+    markPreviewBlock(line);
+  }
+  const scheduleCursor = () => {
+    if (!cursorRaf) cursorRaf = requestAnimationFrame(() => { cursorRaf = 0; updateCursor(); });
+  };
+
+  function clearCursorBlock() {
+    preview.querySelector(".cursor-block")?.classList.remove("cursor-block");
+  }
+
+  // Tint the smallest block whose source lines contain the cursor line.
+  function markPreviewBlock(line) {
+    clearCursorBlock();
+    let best = null;
+    let bestSpan = Infinity;
+    for (const n of preview.querySelectorAll(BLOCKS)) {
+      const pos = parsePos(n.dataset.sourcepos);
+      if (!pos || line < pos[0] || line > pos[1]) continue;
+      const span = pos[1] - pos[0];
+      if (span < bestSpan) { best = n; bestSpan = span; }
+    }
+    if (!best) return;
+    best.classList.add("cursor-block");
+    if (document.activeElement === editor) {
+      const r = best.getBoundingClientRect();
+      const v = previewPane.getBoundingClientRect();
+      if (r.bottom < v.top + 30 || r.top > v.bottom - 30) {
+        previewPane.scrollTop += r.top - v.top - previewPane.clientHeight / 3;
+      }
+    }
   }
 
   async function loadEditor(keepScroll = false) {
@@ -721,6 +790,7 @@
     }
     editor.value = S.savedText;
     fitEditor();
+    updateCursor(true);
     setDirty(false);
     if (keepScroll) sourcePane.scrollTop = scroll;
     else syncFromPreview();
@@ -730,7 +800,7 @@
     if (!S.file) return showToast("Open a Markdown file to edit it");
     S.editing = true;
     document.body.classList.add("editing");
-    editor.hidden = false;
+    $("#editor-wrap").hidden = false;
     $("#btn-edit").classList.add("on");
     $("#btn-edit .label").textContent = "Editing";
     $("#btn-edit").title = "Lock editing";
@@ -748,7 +818,8 @@
     S.previewIsBuffer = false;
     S.editing = false;
     setDirty(false);
-    editor.hidden = true;
+    $("#editor-wrap").hidden = true;
+    clearCursorBlock();
     editor.value = "";
     document.body.classList.remove("editing");
     $("#btn-edit").classList.remove("on");
@@ -793,6 +864,7 @@
     previewPane.scrollTop = scroll;
     S.previewIsBuffer = true;
     revealCaret();
+    markPreviewBlock(curLine || caretLine());
   }
 
   // Keep the block being typed into visible in the preview.
@@ -881,6 +953,10 @@
   }
 
   editor.addEventListener("input", onEdit);
+  for (const ev of ["keyup", "click", "select", "focus"]) editor.addEventListener(ev, scheduleCursor);
+  document.addEventListener("selectionchange", () => {
+    if (document.activeElement === editor) scheduleCursor();
+  });
   // While typing, the preview follows the editor.
   editor.addEventListener("keydown", () => (driver = "source"));
   editor.addEventListener("focus", () => (driver = "source"));

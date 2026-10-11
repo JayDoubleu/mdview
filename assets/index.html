@@ -49,7 +49,13 @@
   <div class="splitter" id="split-right"></div>
   <section id="source-pane">
     <div id="source" class="source"><pre class="gutter" id="gutter"></pre><pre class="code"><code id="source-code"></code></pre></div>
-    <textarea id="editor" class="editor" wrap="off" spellcheck="false" autocomplete="off" autocapitalize="off" hidden></textarea>
+    <div id="editor-wrap" class="editor-wrap" hidden>
+      <div id="editor-gutter" class="editor-gutter"><div id="gutter-line" class="cur-line"></div><pre id="editor-numbers"></pre></div>
+      <div class="editor-main">
+        <div id="editor-line" class="cur-line"></div>
+        <textarea id="editor" class="editor" wrap="off" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>
+      </div>
+    </div>
   </section>
 </main>
 <div id="modal" class="modal" hidden>
