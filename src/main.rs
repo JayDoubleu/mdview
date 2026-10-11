@@ -204,15 +204,21 @@ fn main() -> wry::Result<()> {
         .with_devtools(cfg!(debug_assertions))
         .with_ipc_handler(move |req| handle_ipc(&ipc_proxy, req.body()))
         .with_navigation_handler(move |url| {
-            if url.starts_with(origin) || url.starts_with("about:") {
+            // The app is a single page; never navigate away from it.
+            let page = url.split(['?', '#']).next().unwrap_or("");
+            if page == format!("{origin}/") || page == format!("{origin}/index.html") {
                 true
             } else {
-                let _ = open::that_detached(&url);
+                if server::is_web_url(&url) {
+                    let _ = open::that_detached(&url);
+                }
                 false
             }
         })
         .with_new_window_req_handler(|url, _| {
-            let _ = open::that_detached(&url);
+            if server::is_web_url(&url) {
+                let _ = open::that_detached(&url);
+            }
             NewWindowResponse::Deny
         })
         .with_drag_drop_handler(move |ev| {
@@ -361,7 +367,22 @@ fn handle_ipc(proxy: &EventLoopProxy<UserEvent>, body: &str) {
         Some("watch") => {
             let _ = proxy.send_event(UserEvent::Watch(PathBuf::from(arg)));
         }
-        Some("open") => {
+        // Links in documents: web and mail URLs only.
+        Some("open_url") if server::is_web_url(arg) => {
+            let _ = open::that_detached(arg);
+        }
+        // Local files linked from documents: open harmless types, otherwise
+        // just show the folder so nothing executable is ever launched.
+        Some("open_link_path") => {
+            let p = Path::new(arg);
+            if p.is_dir() || (p.is_file() && server::is_safe_to_open(p)) {
+                let _ = open::that_detached(p);
+            } else if let Some(dir) = p.parent().filter(|d| d.is_dir()) {
+                let _ = open::that_detached(dir);
+            }
+        }
+        // Files the user double-clicks in the tree.
+        Some("open_path") if Path::new(arg).exists() => {
             let _ = open::that_detached(arg);
         }
         Some("quit") => {

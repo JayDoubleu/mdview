@@ -136,6 +136,7 @@
     S.treeW = Math.max(140, Math.min(x, window.innerWidth - 300));
     store.set("treeW", S.treeW);
     applyLayout();
+    fadeCrumbs();
   });
   splitter("#split-right", (x) => {
     S.sourceW = Math.max(160, Math.min(window.innerWidth - x, window.innerWidth - 300));
@@ -171,8 +172,16 @@
     });
     c.append(inner);
     c.title = S.root;
+    fadeCrumbs();
     $("#btn-up").disabled = dirname(S.root) === S.root;
   }
+
+  // Long paths are clipped on the left; fade the cut edge instead of slicing a word.
+  function fadeCrumbs() {
+    const c = $("#crumbs");
+    c.classList.toggle("overflow", c.scrollWidth > c.clientWidth + 1);
+  }
+  window.addEventListener("resize", fadeCrumbs);
 
   async function loadTree() {
     tree.innerHTML = "";
@@ -221,7 +230,7 @@
     } else if (ent.md) {
       row.onclick = () => openFile(ent.path);
     } else {
-      row.ondblclick = () => ipc("open", ent.path);
+      row.ondblclick = () => ipc("open_path", ent.path);
       row.title = ent.path + "\n(double-click to open with the default app)";
     }
     return li;
@@ -480,13 +489,13 @@
     const href = a.getAttribute("href");
     e.preventDefault();
     if (href.startsWith("#")) return scrollToAnchor(href.slice(1));
-    if (EXTERNAL.test(href) && !/^file:/i.test(href)) return ipc("open", href);
+    if (EXTERNAL.test(href) && !/^file:/i.test(href)) return ipc("open_url", href);
     const [pathPart, hash] = href.split("#");
     if (!pathPart) return;
     const r = await api("resolve", { base: S.file || S.root, rel: pathPart });
     if (r.kind === "md") openFile(r.path, { anchor: hash || null });
     else if (r.kind === "dir") { setRoot(r.path); if (!S.showTree) toggleTree(); }
-    else if (r.kind === "other") ipc("open", r.path);
+    else if (r.kind === "other") ipc("open_link_path", r.path);
     else showToast(`Not found: ${pathPart}`);
   });
 

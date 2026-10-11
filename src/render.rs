@@ -4,6 +4,7 @@ use comrak::adapters::CodefenceRendererAdapter;
 use comrak::nodes::Sourcepos;
 use comrak::plugins::syntect::{SyntectAdapter, SyntectAdapterBuilder};
 use comrak::{Options, markdown_to_html_with_plugins, options::Plugins};
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::OnceLock;
 use syntect::highlighting::ThemeSet;
@@ -80,6 +81,9 @@ impl CodefenceRendererAdapter for Mermaid {
 }
 
 /// Renders markdown to HTML using GitHub flavoured extensions.
+///
+/// Raw HTML is allowed (as on GitHub) but sanitized: documents may come from
+/// untrusted repositories, and the page can read local files through the app.
 pub fn markdown(src: &str) -> String {
     let opts = options();
     let mut plugins = Plugins::default();
@@ -88,7 +92,31 @@ pub fn markdown(src: &str) -> String {
         .render
         .codefence_renderers
         .insert("mermaid".into(), &Mermaid);
-    markdown_to_html_with_plugins(src, &opts, &plugins)
+    sanitizer()
+        .clean(&markdown_to_html_with_plugins(src, &opts, &plugins))
+        .to_string()
+}
+
+fn sanitizer() -> &'static ammonia::Builder<'static> {
+    static SANITIZER: OnceLock<ammonia::Builder<'static>> = OnceLock::new();
+    SANITIZER.get_or_init(|| {
+        let mut b = ammonia::Builder::default();
+        b.add_tags(["section", "input", "picture", "source", "video", "audio"])
+            .add_generic_attributes(["class", "id", "align", "dir", "aria-label", "aria-hidden"])
+            .generic_attribute_prefixes(HashSet::from(["data-"]))
+            .add_tag_attributes("a", ["name"])
+            .add_tag_attributes("img", ["loading"])
+            .add_tag_attributes("input", ["type", "checked", "disabled"])
+            .add_tag_attributes("source", ["src", "srcset", "type", "media"])
+            .add_tag_attributes(
+                "video",
+                ["src", "controls", "width", "height", "loop", "muted"],
+            )
+            .add_tag_attributes("audio", ["src", "controls", "loop"])
+            .url_schemes(HashSet::from(["http", "https", "mailto"]))
+            .link_rel(None);
+        b
+    })
 }
 
 /// Highlights raw markdown source, returning one `<span class="line">` per source line
@@ -261,6 +289,39 @@ mod tests {
             source(src).matches("class=\"line\"").count(),
             src.lines().count() + 1
         );
+    }
+
+    #[test]
+    fn sanitizes_raw_html() {
+        let html = markdown(
+            "<script>alert(1)</script>\n\n<iframe src=\"x.html\"></iframe>\n\n\
+             <img src=\"a.png\" onerror=\"alert(1)\">\n\n[x](javascript:alert(1))\n\n\
+             <details><summary>s</summary>\n\nok\n\n</details>\n",
+        );
+        for bad in ["<script", "alert", "<iframe", "onerror", "javascript:"] {
+            assert!(!html.contains(bad), "{bad} in {html}");
+        }
+        assert!(
+            html.contains("<details>") && html.contains("<img src=\"a.png\""),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn sanitizer_keeps_gfm_markup() {
+        let html = markdown("# T\n\n- [x] a\n\n$x$\n\nf[^1]\n\n[^1]: n\n\n> [!NOTE]\n> n\n");
+        for good in [
+            "id=\"t\"",
+            "class=\"anchor\"",
+            "type=\"checkbox\"",
+            "checked",
+            "data-math-style",
+            "data-sourcepos",
+            "<section",
+            "markdown-alert-note",
+        ] {
+            assert!(html.contains(good), "{good} missing in {html}");
+        }
     }
 
     #[test]

@@ -74,7 +74,7 @@ fn respond(mime: &str, body: Cow<'static, [u8]>) -> Resp {
     Response::builder()
         .header(CONTENT_TYPE, mime)
         .header("Cache-Control", "no-store")
-        .header("Access-Control-Allow-Origin", "*")
+        .header("X-Content-Type-Options", "nosniff")
         .body(body)
         .unwrap()
 }
@@ -229,8 +229,41 @@ fn resolve(base: &str, rel: &str) -> Value {
 fn local_file(base: &str, rel: &str) -> Res {
     let p = resolve_path(base, rel);
     let data = fs::read(&p).map_err(|e| (404, format!("{}: {e}", p.display())))?;
-    let name = p.to_string_lossy();
-    Ok(respond(mime_for(&name), Cow::Owned(data)))
+    // Documents load images and media from here. Anything that could run code
+    // if opened directly (HTML, SVG, scripts) is locked down by a sandbox CSP.
+    let mime = match mime_for(&p.to_string_lossy()) {
+        m if m.starts_with("text/html") || m.starts_with("text/javascript") => "text/plain",
+        m => m,
+    };
+    let mut resp = respond(mime, Cow::Owned(data));
+    resp.headers_mut().insert(
+        "Content-Security-Policy",
+        "sandbox; default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'"
+            .parse()
+            .unwrap(),
+    );
+    Ok(resp)
+}
+
+/// Whether a link target is a URL the OS may open (web or mail only).
+pub fn is_web_url(url: &str) -> bool {
+    let lower = url.trim_start().to_ascii_lowercase();
+    ["http://", "https://", "mailto:"]
+        .iter()
+        .any(|s| lower.starts_with(s))
+}
+
+/// File types that are safe to hand to the OS when a document links to them.
+/// Anything else (scripts, executables, installers...) is shown in its folder instead.
+pub fn is_safe_to_open(p: &Path) -> bool {
+    const SAFE: &[&str] = &[
+        "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "avif", "pdf", "txt", "log",
+        "csv", "tsv", "json", "yaml", "yml", "toml", "xml", "ini", "cfg", "conf", "mp4", "webm",
+        "mov", "mp3", "wav", "ogg", "flac",
+    ];
+    p.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| SAFE.contains(&e.to_ascii_lowercase().as_str()))
 }
 
 #[cfg(test)]
@@ -252,6 +285,18 @@ mod tests {
                 .iter()
                 .any(|(n, _)| *n == "vendor/katex/katex.min.css")
         );
+    }
+
+    #[test]
+    fn open_policies() {
+        assert!(is_web_url("https://example.com"));
+        assert!(is_web_url("MAILTO:a@b.c"));
+        assert!(!is_web_url("file:///etc/passwd"));
+        assert!(!is_web_url("javascript:alert(1)"));
+        assert!(is_safe_to_open(Path::new("/a/b.PNG")));
+        assert!(!is_safe_to_open(Path::new("/a/setup.exe")));
+        assert!(!is_safe_to_open(Path::new("/a/run.sh")));
+        assert!(!is_safe_to_open(Path::new("/a/noext")));
     }
 
     #[test]

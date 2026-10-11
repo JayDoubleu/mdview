@@ -12,7 +12,7 @@ mdview                # browse the current folder
 
 ## Features
 
-- **GitHub-flavoured Markdown.** Tables, task lists, strikethrough, autolinks, footnotes, alerts (`> [!NOTE]`), emoji shortcodes (`:tada:`), heading anchors and raw HTML.
+- **GitHub-flavoured Markdown.** Tables, task lists, strikethrough, autolinks, footnotes, alerts (`> [!NOTE]`), emoji shortcodes (`:tada:`), heading anchors and raw HTML (sanitized, see [Security](#security)).
 - **Syntax highlighting** for fenced code blocks. Each block gets a copy button.
 - **Mermaid diagrams** and **math** (`$inline$`, `$$display$$` and ` ```math ` blocks) via bundled Mermaid and KaTeX. Both work offline.
 - **File tree** on the left. It opens at the file's folder. Click a folder to expand it, double-click it (or use a breadcrumb) to make it the root, and use ↑ or <kbd>Backspace</kbd> to go up a level. The 👁 button shows non-Markdown files too.
@@ -20,13 +20,13 @@ mdview                # browse the current folder
 - **Live reload.** When you save the file in your editor, the preview refreshes and keeps your scroll position.
 - Light and dark themes (follows the OS; toggle with <kbd>Ctrl/Cmd+L</kbd>), zoom, find-in-page, back/forward history, and drag-and-drop to open a file.
 - Relative links to other `.md` files open inside mdview. Web links open in your browser. Local images load as you'd expect.
-- About 9 MB as a single binary. It uses the system webview (WebView2, WKWebView or WebKitGTK), so nothing like Electron gets bundled.
+- About 10 MB as a single binary. It uses the system webview (WebView2, WKWebView or WebKitGTK), so nothing like Electron gets bundled.
 
 ## Install
 
 ### Prebuilt binaries
 
-Every push builds binaries for all three platforms in GitHub Actions. Download `mdview-<platform>` from the [Actions tab](https://github.com/JayDoubleu/mdview/actions) (or from [Releases](https://github.com/JayDoubleu/mdview/releases) once a `v*` tag is pushed), extract it, and put `mdview` somewhere on your `PATH`.
+Download the archive for your platform from [Releases](https://github.com/JayDoubleu/mdview/releases), extract it, and put `mdview` somewhere on your `PATH`. Every commit also builds binaries in [GitHub Actions](https://github.com/JayDoubleu/mdview/actions); look under Artifacts on any green run.
 
 - **macOS:** the binary isn't signed, so clear the quarantine flag once: `xattr -d com.apple.quarantine ./mdview`.
 - **Windows:** needs the WebView2 runtime, which ships with Windows 10 and 11.
@@ -75,12 +75,32 @@ On Linux, mdview turns off WebKitGTK's animated wheel scrolling because it feels
 
 You can drag the dividers to resize the panes. mdview remembers pane sizes, theme and zoom between runs.
 
+## Security
+
+mdview is meant to be safe to point at Markdown you didn't write, such as a README in a freshly cloned repository.
+
+- Raw HTML is sanitized with an allowlist, much like GitHub does. Scripts, iframes, forms, event handlers and `javascript:` links are removed.
+- Local files a document references (images, video) are served under a sandboxing Content Security Policy, and HTML or JavaScript files are only ever served as plain text, so they can't run.
+- Links to web pages open in your browser. Links to local files only open harmless types (images, PDFs, text and similar). For anything else, such as scripts or executables, mdview opens the containing folder instead of running it.
+- Remote images in documents load directly, as in a browser, so the image host can see that the document was opened.
+
 ## How it works
 
 - `src/main.rs` creates the window ([tao](https://github.com/tauri-apps/tao)) and the webview ([wry](https://github.com/tauri-apps/wry)), watches the open file's folder ([notify](https://github.com/notify-rs/notify)), and handles the CLI.
 - `src/server.rs` serves a `mdview://` custom protocol. It provides the embedded UI assets plus a small JSON API for listing folders, rendering files and loading local images.
 - `src/render.rs` renders Markdown with [comrak](https://github.com/kivikakk/comrak) (GFM extensions) and highlights code with [syntect](https://github.com/trishume/syntect).
 - `assets/` holds the UI (plain HTML, CSS and JS, no build step) and the vendored Mermaid and KaTeX. `build.rs` embeds all of it into the binary.
+
+## Development
+
+```sh
+cargo run -- README.md   # debug build; right-click the page for the web inspector
+cargo test
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+```
+
+CI runs the same checks on Linux, macOS and Windows. Pushing a `v*` tag publishes a GitHub Release with binaries for all three.
 
 ## License
 

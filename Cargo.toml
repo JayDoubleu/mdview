@@ -12,6 +12,7 @@ categories = ["text-processing", "gui"]
 exclude = ["/.github", "/docs"]
 
 [dependencies]
+ammonia = "4"
 comrak = { version = "0.56", default-features = false, features = ["syntect-fancy", "shortcodes"] }
 dirs = "6"
 dunce = "1"
