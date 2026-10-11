@@ -754,7 +754,7 @@
   // selections in the read-only source pane.
   let curRange = "";
   let cursorRaf = 0;
-  const BLOCKS = "p,li,h1,h2,h3,h4,h5,h6,pre,blockquote,tr,dt,dd,hr,table,.markdown-alert,.math-display,.mermaid";
+  const BLOCKS = "p,li,h1,h2,h3,h4,h5,h6,pre,blockquote,tr,dt,dd,hr,table,.markdown-alert,.math-display,.mermaid,.front-matter";
 
   function lineAt(text, pos) {
     let n = 1;
@@ -807,7 +807,11 @@
     }
     // Keep only the innermost matches (a paragraph rather than its list item).
     const leaves = hits.filter((n) => !hits.some((m) => m !== n && n.contains(m)));
-    for (const n of leaves) n.classList.add("cursor-block");
+    for (const n of leaves) {
+      n.classList.add("cursor-block");
+      // Open the front matter panel when the cursor is inside it.
+      if (n.matches("details.front-matter")) n.open = true;
+    }
     if (!reveal || !leaves.length) return;
     const r = leaves[0].getBoundingClientRect();
     const v = previewPane.getBoundingClientRect();

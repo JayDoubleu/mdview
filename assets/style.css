@@ -464,8 +464,24 @@ body.resizing iframe, body.resizing #preview-pane, body.resizing #source-pane { 
 .markdown-body .mermaid { display: flex; justify-content: center; margin-bottom: 16px; }
 .markdown-body .mermaid svg { max-width: 100%; height: auto; }
 .markdown-body .math-display { display: block; overflow-x: auto; overflow-y: hidden; margin-bottom: 16px; text-align: center; }
-.markdown-body .front-matter { font-size: 85%; }
-.markdown-body .front-matter pre { margin-bottom: 24px; }
+.markdown-body .front-matter {
+  margin-bottom: 24px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--pre-bg);
+  font-size: 85%;
+}
+.markdown-body .front-matter summary {
+  padding: 6px 12px;
+  color: var(--fg-muted);
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.markdown-body .front-matter .fm-count { margin-left: 6px; font-weight: 400; color: var(--fg-subtle); }
+.markdown-body .front-matter[open] summary { border-bottom: 1px solid var(--border-soft); }
+.markdown-body .front-matter pre { margin: 0; border-radius: 0 0 6px 6px; font-size: 100%; }
 
 /* syntect's markdown grammar flags some valid GFM (e.g. footnotes) as invalid */
 .hl-invalid { background: none !important; }

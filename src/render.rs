@@ -92,9 +92,64 @@ pub fn markdown(src: &str) -> String {
         .render
         .codefence_renderers
         .insert("mermaid".into(), &Mermaid);
-    sanitizer()
-        .clean(&markdown_to_html_with_plugins(src, &opts, &plugins))
-        .to_string()
+    // comrak skips front matter (keeping line numbers intact); show it as a
+    // collapsible panel at the top instead of dropping it silently.
+    let mut html = front_matter(src).map(front_matter_html).unwrap_or_default();
+    html.push_str(&markdown_to_html_with_plugins(src, &opts, &plugins));
+    sanitizer().clean(&html).to_string()
+}
+
+/// A leading `---` ... `---` (or `...`) YAML block: its text and last line number.
+fn front_matter(src: &str) -> Option<(&str, usize)> {
+    let mut lines = src.split_inclusive('\n');
+    if lines.next()?.trim_end() != "---" {
+        return None;
+    }
+    let start = src.find('\n')? + 1;
+    let mut offset = start;
+    for (i, line) in lines.enumerate() {
+        if matches!(line.trim_end(), "---" | "...") {
+            return Some((&src[start..offset], i + 2));
+        }
+        offset += line.len();
+    }
+    None
+}
+
+fn front_matter_html((yaml, last_line): (&str, usize)) -> String {
+    let fields = yaml
+        .lines()
+        .filter(|l| {
+            l.chars()
+                .next()
+                .is_some_and(|c| !c.is_whitespace() && c != '#' && c != '-')
+        })
+        .filter(|l| l.contains(':'))
+        .count();
+    let e = engine();
+    let syntax = e
+        .syntaxes
+        .find_syntax_by_extension("yaml")
+        .unwrap_or_else(|| e.syntaxes.find_syntax_plain_text());
+    let mut generator =
+        ClassedHTMLGenerator::new_with_class_style(syntax, &e.syntaxes, CLASS_STYLE);
+    let mut ok = true;
+    for line in LinesWithEndings::from(yaml) {
+        ok &= generator
+            .parse_html_for_line_which_includes_newline(line)
+            .is_ok();
+    }
+    let code = if ok {
+        generator.finalize()
+    } else {
+        html_escape(yaml)
+    };
+    let plural = if fields == 1 { "" } else { "s" };
+    format!(
+        "<details class=\"front-matter\" data-sourcepos=\"1:1-{last_line}:3\">\
+         <summary>Front matter <span class=\"fm-count\">{fields} field{plural}</span></summary>\
+         <pre class=\"syntax-highlighting\"><code>{code}</code></pre></details>\n"
+    )
 }
 
 fn sanitizer() -> &'static ammonia::Builder<'static> {
@@ -322,6 +377,24 @@ mod tests {
         ] {
             assert!(html.contains(good), "{good} missing in {html}");
         }
+    }
+
+    #[test]
+    fn front_matter_is_shown_collapsed() {
+        let src = "---\ntitle: Hi\ntags:\n  - a\n---\n\n# Body\n";
+        let html = markdown(src);
+        assert!(
+            html.starts_with("<details class=\"front-matter\" data-sourcepos=\"1:1-5:3\">"),
+            "{html}"
+        );
+        assert!(html.contains("2 fields"), "{html}");
+        assert!(html.contains("title"), "{html}");
+        assert!(
+            html.contains("data-sourcepos=\"7:1-7:6\""),
+            "body keeps its line numbers: {html}"
+        );
+        assert!(!markdown("# No front matter\n").contains("class=\"front-matter\""));
+        assert!(!markdown("---\nnot closed\n").contains("class=\"front-matter\""));
     }
 
     #[test]
