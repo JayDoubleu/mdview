@@ -216,6 +216,25 @@
       ul.append(li);
     }
     for (const ent of data.entries) ul.append(treeNode(ent, depth));
+    if (data.entries.some((e) => e.dir)) loadCounts(ul, data.path);
+  }
+
+  // Badge each folder with how many Markdown files it holds (including subfolders).
+  // Counted in the background, so the tree shows straight away.
+  async function loadCounts(ul, dir) {
+    let data;
+    try { data = await api("counts", { path: dir }); } catch { return; }
+    for (const li of ul.querySelectorAll(":scope > li.dir")) {
+      const c = data.counts[li.dataset.path];
+      const badge = li.querySelector(":scope > .row > .count");
+      if (!c || !badge) continue;
+      badge.textContent = c.n + (c.partial ? "+" : "");
+      badge.classList.toggle("zero", c.n === 0 && !c.partial);
+      badge.title = c.partial
+        ? `At least ${c.n} Markdown files (stopped counting: very large folder)`
+        : `${c.n} Markdown file${c.n === 1 ? "" : "s"} in this folder and its subfolders`;
+      badge.hidden = false;
+    }
   }
 
   function treeNode(ent, depth) {
@@ -229,6 +248,11 @@
     const ico = el("span", "fico");
     ico.innerHTML = ent.dir ? ICON.folder : ent.md ? ICON.md : ICON.file;
     row.append(caret, ico, el("span", "name", ent.name));
+    if (ent.dir) {
+      const count = el("span", "count");
+      count.hidden = true;
+      row.append(count);
+    }
     li.append(row);
     if (!ent.dir && samePath(ent.path, S.file)) row.classList.add("current");
 
@@ -720,64 +744,98 @@
       let g = "";
       for (let i = 1; i <= n; i++) g += `<span>${i}</span>\n`;
       $("#editor-numbers").innerHTML = g;
-      curLine = 0;
+      curRange = "";
     }
     updateCursor();
   }
 
-  // ---- current line: a band in the editor, a soft tint on the preview block ----
-  let curLine = 0;
+  // ---- cursor / selection: a band in the editor, a soft tint in the preview ----
+  // Works for a caret (one line) and for multi-line selections, and also for
+  // selections in the read-only source pane.
+  let curRange = "";
   let cursorRaf = 0;
   const BLOCKS = "p,li,h1,h2,h3,h4,h5,h6,pre,blockquote,tr,dt,dd,hr,table,.markdown-alert,.math-display,.mermaid";
 
-  function caretLine() {
-    const text = editor.value;
-    const end = editor.selectionStart;
+  function lineAt(text, pos) {
     let n = 1;
-    for (let i = text.indexOf("\n"); i !== -1 && i < end; i = text.indexOf("\n", i + 1)) n++;
+    for (let i = text.indexOf("\n"); i !== -1 && i < pos; i = text.indexOf("\n", i + 1)) n++;
     return n;
+  }
+
+  // First and last selected line; a selection ending at the start of a line
+  // (e.g. after selecting whole lines) doesn't include that line.
+  function editorRange() {
+    const text = editor.value;
+    const { selectionStart: s0, selectionEnd: s1 } = editor;
+    const a = lineAt(text, s0);
+    let b = s1 > s0 ? lineAt(text, s1) : a;
+    if (b > a && text[s1 - 1] === "\n") b--;
+    return [a, b];
   }
 
   function updateCursor(force = false) {
     if (!S.editing) return;
-    const line = caretLine();
-    if (line === curLine && !force) return;
-    curLine = line;
-    const top = 12 + (line - 1) * (parseFloat(getComputedStyle(editor).lineHeight) || 20);
-    $("#editor-line").style.top = $("#gutter-line").style.top = top + "px";
+    const [a, b] = editorRange();
+    const key = a + ":" + b;
+    if (key === curRange && !force) return;
+    curRange = key;
+    const lh = parseFloat(getComputedStyle(editor).lineHeight) || 20;
+    for (const band of [$("#editor-line"), $("#gutter-line")]) {
+      band.style.top = 12 + (a - 1) * lh + "px";
+      band.style.height = (b - a + 1) * lh + "px";
+    }
     const nums = $("#editor-numbers");
-    nums.querySelector(".cur")?.classList.remove("cur");
-    nums.children[line - 1]?.classList.add("cur");
-    markPreviewBlock(line);
+    for (const n of nums.querySelectorAll(".cur")) n.classList.remove("cur");
+    for (let i = a; i <= b; i++) nums.children[i - 1]?.classList.add("cur");
+    markPreview(a, b, document.activeElement === editor);
   }
   const scheduleCursor = () => {
     if (!cursorRaf) cursorRaf = requestAnimationFrame(() => { cursorRaf = 0; updateCursor(); });
   };
 
   function clearCursorBlock() {
-    preview.querySelector(".cursor-block")?.classList.remove("cursor-block");
+    for (const n of preview.querySelectorAll(".cursor-block")) n.classList.remove("cursor-block");
   }
 
-  // Tint the smallest block whose source lines contain the cursor line.
-  function markPreviewBlock(line) {
+  // Tint the innermost blocks whose source lines overlap lines a..b.
+  function markPreview(a, b, reveal) {
     clearCursorBlock();
-    let best = null;
-    let bestSpan = Infinity;
+    const hits = [];
     for (const n of preview.querySelectorAll(BLOCKS)) {
       const pos = parsePos(n.dataset.sourcepos);
-      if (!pos || line < pos[0] || line > pos[1]) continue;
-      const span = pos[1] - pos[0];
-      if (span < bestSpan) { best = n; bestSpan = span; }
+      if (pos && pos[0] <= b && pos[1] >= a) hits.push(n);
     }
-    if (!best) return;
-    best.classList.add("cursor-block");
-    if (document.activeElement === editor) {
-      const r = best.getBoundingClientRect();
-      const v = previewPane.getBoundingClientRect();
-      if (r.bottom < v.top + 30 || r.top > v.bottom - 30) {
-        previewPane.scrollTop += r.top - v.top - previewPane.clientHeight / 3;
-      }
+    // Keep only the innermost matches (a paragraph rather than its list item).
+    const leaves = hits.filter((n) => !hits.some((m) => m !== n && n.contains(m)));
+    for (const n of leaves) n.classList.add("cursor-block");
+    if (!reveal || !leaves.length) return;
+    const r = leaves[0].getBoundingClientRect();
+    const v = previewPane.getBoundingClientRect();
+    if (r.bottom < v.top + 30 || r.top > v.bottom - 30) {
+      previewPane.scrollTop += r.top - v.top - previewPane.clientHeight / 3;
     }
+  }
+
+  // Read-only source pane: selecting (or clicking) lines tints them in the preview.
+  let sourceMarked = false;
+  let sourceRaf = 0;
+  function sourceLine(node) {
+    const code = $("#source-code");
+    const el = (node && node.nodeType === 1 ? node : node?.parentElement)?.closest?.(".line");
+    return el && el.parentElement === code ? Array.prototype.indexOf.call(code.children, el) + 1 : 0;
+  }
+  function updateSourceSelection() {
+    const sel = window.getSelection();
+    const range = sel && sel.rangeCount ? sel.getRangeAt(0) : null;
+    const a = range ? sourceLine(range.startContainer) : 0;
+    let b = range ? sourceLine(range.endContainer) : 0;
+    if (!a || !b) {
+      if (sourceMarked) { clearCursorBlock(); sourceMarked = false; }
+      return;
+    }
+    if (b > a && range.endOffset === 0) b--;
+    markPreview(a, b, true);
+    sourceMarked = true;
   }
 
   async function loadEditor(keepScroll = false) {
@@ -801,6 +859,7 @@
     S.editing = true;
     document.body.classList.add("editing");
     $("#editor-wrap").hidden = false;
+    $("#btn-discard").hidden = false;
     $("#btn-edit").classList.add("on");
     $("#btn-edit .label").textContent = "Editing";
     $("#btn-edit").title = "Lock editing";
@@ -819,6 +878,7 @@
     S.editing = false;
     setDirty(false);
     $("#editor-wrap").hidden = true;
+    $("#btn-discard").hidden = true;
     clearCursorBlock();
     editor.value = "";
     document.body.classList.remove("editing");
@@ -841,6 +901,7 @@
     document.body.classList.toggle("dirty", S.dirty);
     $("#unsaved").hidden = !S.dirty;
     $("#btn-save").hidden = !S.dirty;
+    $("#btn-discard").disabled = !S.dirty;
     $("#draft-banner").hidden = !S.dirty;
     if (S.docName) ipc("title", `${S.dirty ? "● " : ""}${S.docName} — mdview`);
   }
@@ -864,7 +925,8 @@
     previewPane.scrollTop = scroll;
     S.previewIsBuffer = true;
     revealCaret();
-    markPreviewBlock(curLine || caretLine());
+    curRange = "";
+    updateCursor();
   }
 
   // Keep the block being typed into visible in the preview.
@@ -947,6 +1009,33 @@
     }
   }
 
+  // Revert the buffer to the file on disk. Done as an edit so Ctrl+Z brings it back.
+  function discardChanges() {
+    if (!S.editing || !S.dirty) return;
+    const discarded = editor.value;
+    editor.focus({ preventScroll: true });
+    editor.select();
+    if (!document.execCommand("insertText", false, S.savedText)) editor.value = S.savedText;
+    editor.setSelectionRange(0, 0);
+    onEdit();
+    showUndoToast("Changes discarded", () => {
+      if (!S.editing) return;
+      editor.value = discarded;
+      onEdit();
+      editor.focus({ preventScroll: true });
+    });
+  }
+
+  function showUndoToast(msg, onUndo) {
+    document.querySelector(".undo-toast")?.remove();
+    const t = el("div", "undo-toast");
+    const b = el("button", null, "Undo");
+    b.onclick = () => { t.remove(); onUndo(); };
+    t.append(el("span", null, msg), b);
+    document.body.append(t);
+    setTimeout(() => t.remove(), 8000);
+  }
+
   // Called by the app when the window is closing with unsaved edits.
   async function requestClose() {
     if (await confirmLeave()) ipc("quit");
@@ -955,7 +1044,9 @@
   editor.addEventListener("input", onEdit);
   for (const ev of ["keyup", "click", "select", "focus"]) editor.addEventListener(ev, scheduleCursor);
   document.addEventListener("selectionchange", () => {
-    if (document.activeElement === editor) scheduleCursor();
+    if (document.activeElement === editor) return scheduleCursor();
+    if (S.editing || sourceRaf) return;
+    sourceRaf = requestAnimationFrame(() => { sourceRaf = 0; updateSourceSelection(); });
   });
   // While typing, the preview follows the editor.
   editor.addEventListener("keydown", () => (driver = "source"));
@@ -1020,6 +1111,7 @@
   $("#btn-source").onclick = toggleSource;
   $("#btn-edit").onclick = () => (S.editing ? leaveEdit() : enterEdit());
   $("#btn-save").onclick = save;
+  $("#btn-discard").onclick = discardChanges;
   $("#btn-theme").onclick = toggleTheme;
   $("#btn-back").onclick = () => go(-1);
   $("#btn-fwd").onclick = () => go(1);

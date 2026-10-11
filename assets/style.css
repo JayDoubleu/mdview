@@ -248,7 +248,24 @@ body.resizing iframe, body.resizing #preview-pane, body.resizing #source-pane { 
 .tree .row:hover { background: var(--bg-hover); }
 .tree .row.current { background: var(--bg-active); color: var(--accent-fg); font-weight: 600; }
 .tree .row.other { color: var(--fg-subtle); }
-.tree .row .name { overflow: hidden; text-overflow: ellipsis; }
+.tree .row .name { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.tree .count {
+  flex: none;
+  margin-left: auto;
+  min-width: 18px;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: var(--bg-hover);
+  color: var(--fg-muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 16px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.tree .count.zero { opacity: .5; font-weight: 500; }
+.tree .count[hidden] { display: none; }
 .tree .caret { width: 16px; flex: none; color: var(--fg-subtle); transition: transform .12s; }
 .tree li.open > .row .caret { transform: rotate(90deg); }
 .tree .fico { flex: none; color: var(--fg-muted); }
@@ -616,3 +633,32 @@ body.dirty #preview-pane { box-shadow: inset 3px 0 0 var(--warn-border); }
 .modal-box p { margin: 0 0 16px; color: var(--fg-muted); line-height: 1.45; }
 .modal-actions { display: flex; gap: 8px; align-items: center; }
 .modal-actions .spacer { flex: 1; }
+button.toggle.discard:not(:disabled):hover { color: var(--caution); border-color: var(--caution); background: transparent; }
+button.toggle.discard:disabled { opacity: .45; cursor: default; }
+.undo-toast {
+  position: fixed;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 8px 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .15);
+  color: var(--fg);
+  font-size: 13px;
+}
+.undo-toast button {
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-soft);
+  color: var(--accent-fg);
+  font-weight: 600;
+  cursor: pointer;
+}

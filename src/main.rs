@@ -203,8 +203,14 @@ fn main() -> wry::Result<()> {
     let _menu = macos_menu(proxy.clone());
 
     let builder = WebViewBuilder::new_with_web_context(&mut web_context)
-        .with_custom_protocol("mdview".into(), move |_id, req| {
-            server::handle(&proto_launch, req)
+        .with_asynchronous_custom_protocol("mdview".into(), move |_id, req, responder| {
+            // Folder counting walks directory trees; keep it off the UI thread.
+            if server::is_slow(&req) {
+                let launch = proto_launch.clone();
+                std::thread::spawn(move || responder.respond(server::handle(&launch, req)));
+            } else {
+                responder.respond(server::handle(&proto_launch, req));
+            }
         })
         .with_url(format!("{origin}/"))
         .with_devtools(cfg!(debug_assertions))

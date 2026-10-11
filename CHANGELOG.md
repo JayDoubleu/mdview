@@ -3,6 +3,9 @@
 ## Unreleased
 
 - Basic editing: an Edit button unlocks the file in a plain text editor with a live preview. Changes are only written on Save (Ctrl/Cmd+S), unsaved state is shown in the toolbar, over the preview and in the window title, and locking, switching files or closing with unsaved changes asks before discarding them. Line endings (LF or CRLF) are preserved on save.
+- Editor polish: line numbers, a highlighted cursor line (or selected lines), and a Discard button with Undo.
+- The preview highlights the blocks for the cursor line or selection, in the editor and in the read-only source pane.
+- File tree: each folder shows how many Markdown files it contains, including subfolders.
 
 ## 0.1.0
 

@@ -50,6 +50,7 @@ pub fn handle(launch: &Launch, req: Request<Vec<u8>>) -> Resp {
             "version": env!("CARGO_PKG_VERSION"),
         }))),
         "/api/list" => list(q("path").unwrap_or("."), q("all") == Some("1")),
+        "/api/counts" => folder_counts(q("path").unwrap_or(".")),
         "/api/render" => render_file(q("path").unwrap_or("")),
         "/api/source" => source_file(q("path").unwrap_or("")),
         "/api/raw" => read_text(q("path").unwrap_or(""))
@@ -171,6 +172,60 @@ fn list(dir: &str, all: bool) -> Res {
         "parent": dir.parent().map(ps),
         "entries": entries.into_iter().map(|e| e.2).collect::<Vec<_>>(),
     })))
+}
+
+/// Requests that can take a while (walking folder trees) and should be
+/// answered off the UI thread.
+pub fn is_slow(req: &Request<Vec<u8>>) -> bool {
+    req.uri().path() == "/api/counts"
+}
+
+/// How many entries to look at per folder before giving up and reporting "N+".
+const COUNT_BUDGET: usize = 20_000;
+
+/// Markdown file counts (including subfolders) for each folder inside `dir`.
+fn folder_counts(dir: &str) -> Res {
+    let dir = canon(Path::new(dir));
+    let rd = fs::read_dir(&dir).map_err(|e| (404, format!("{}: {e}", dir.display())))?;
+    let mut counts = serde_json::Map::new();
+    for e in rd.flatten() {
+        if e.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
+        let path = e.path();
+        if !fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let (n, complete) = count_markdown(&path, COUNT_BUDGET);
+        counts.insert(ps(&path), json!({ "n": n, "partial": !complete }));
+    }
+    Ok(json_resp(json!({ "path": ps(&dir), "counts": counts })))
+}
+
+/// Counts Markdown files under `dir`, skipping hidden entries and not following
+/// symlinked folders. Returns `(count, complete)`; incomplete if the budget ran out.
+pub fn count_markdown(dir: &Path, mut budget: usize) -> (usize, bool) {
+    let mut stack = vec![dir.to_path_buf()];
+    let mut n = 0;
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            if budget == 0 {
+                return (n, false);
+            }
+            budget -= 1;
+            if e.file_name().to_string_lossy().starts_with('.') {
+                continue;
+            }
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_dir() {
+                stack.push(e.path());
+            } else if is_markdown(&e.path()) {
+                n += 1;
+            }
+        }
+    }
+    (n, true)
 }
 
 fn read_text(path: &str) -> Result<(PathBuf, String), (u16, String)> {
@@ -325,6 +380,27 @@ mod tests {
         assert!(save_file(&txt, "nope").is_err());
         assert_eq!(fs::read_to_string(&txt).unwrap(), "keep");
         assert!(save_file(&dir.join("missing.md"), "x").is_err());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn counts_markdown_recursively() {
+        let dir = std::env::temp_dir().join(format!("mdview-count-{}", std::process::id()));
+        fs::create_dir_all(dir.join("a/b")).unwrap();
+        fs::create_dir_all(dir.join(".hidden")).unwrap();
+        fs::create_dir_all(dir.join("empty")).unwrap();
+        for f in [
+            "x.md",
+            "a/y.markdown",
+            "a/b/z.md",
+            "a/notes.txt",
+            ".hidden/h.md",
+        ] {
+            fs::write(dir.join(f), "#").unwrap();
+        }
+        assert_eq!(count_markdown(&dir, 1000), (3, true));
+        assert_eq!(count_markdown(&dir.join("empty"), 1000), (0, true));
+        assert!(!count_markdown(&dir, 2).1);
         fs::remove_dir_all(&dir).unwrap();
     }
 
