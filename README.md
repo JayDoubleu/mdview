@@ -28,6 +28,7 @@ mdview                # browse the current folder
 
 Download the archive for your platform from [Releases](https://github.com/JayDoubleu/mdview/releases), extract it, and put `mdview` somewhere on your `PATH`. Every commit also builds binaries in [GitHub Actions](https://github.com/JayDoubleu/mdview/actions); look under Artifacts on any green run.
 
+- **Builds:** Linux (x86_64, ARM64), macOS (one universal binary for Apple Silicon and Intel) and Windows (x86_64, ARM64).
 - **macOS:** the binary isn't signed, so clear the quarantine flag once: `xattr -d com.apple.quarantine ./mdview`.
 - **Windows:** needs the WebView2 runtime, which ships with Windows 10 and 11.
 - **Linux:** needs WebKitGTK 4.1 (`sudo apt install libwebkit2gtk-4.1-0`, `sudo dnf install webkit2gtk4.1`, or `sudo pacman -S webkit2gtk-4.1`).

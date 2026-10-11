@@ -10,4 +10,5 @@ First release.
 - Source pane with line numbers that scrolls in sync with the preview.
 - Live reload on save, light and dark themes, zoom, find, back/forward history and drag-and-drop.
 - `mdview` returns the terminal immediately, like `code`; `--wait` keeps it attached.
+- Prebuilt binaries for Linux (x86_64, ARM64), macOS (universal) and Windows (x86_64, ARM64).
 - Linux: instant wheel scrolling instead of WebKitGTK's animated scrolling, and a workaround for WebKitGTK stutter on NVIDIA drivers.
