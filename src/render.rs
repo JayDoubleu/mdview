@@ -157,6 +157,7 @@ pub fn markdown(src: &str) -> String {
     };
     let mut html = fm.map(front_matter_html).unwrap_or_default();
     html.push_str(&markdown_to_html_with_plugins(body_src, &opts, &plugins));
+    let html = crate::annotations::render(&html, body_src);
     sanitizer().clean(&html).to_string()
 }
 
@@ -263,20 +264,22 @@ fn sanitizer() -> &'static ammonia::Builder<'static> {
     static SANITIZER: OnceLock<ammonia::Builder<'static>> = OnceLock::new();
     SANITIZER.get_or_init(|| {
         let mut b = ammonia::Builder::default();
-        b.add_tags(["section", "input", "picture", "source", "video", "audio"])
-            .add_generic_attributes(["class", "id", "align", "dir", "aria-label", "aria-hidden"])
-            .generic_attribute_prefixes(HashSet::from(["data-"]))
-            .add_tag_attributes("a", ["name"])
-            .add_tag_attributes("img", ["loading"])
-            .add_tag_attributes("input", ["type", "checked", "disabled"])
-            .add_tag_attributes("source", ["src", "srcset", "type", "media"])
-            .add_tag_attributes(
-                "video",
-                ["src", "controls", "width", "height", "loop", "muted"],
-            )
-            .add_tag_attributes("audio", ["src", "controls", "loop"])
-            .url_schemes(HashSet::from(["http", "https", "mailto"]))
-            .link_rel(None);
+        b.add_tags([
+            "section", "aside", "input", "picture", "source", "video", "audio",
+        ])
+        .add_generic_attributes(["class", "id", "align", "dir", "aria-label", "aria-hidden"])
+        .generic_attribute_prefixes(HashSet::from(["data-"]))
+        .add_tag_attributes("a", ["name"])
+        .add_tag_attributes("img", ["loading"])
+        .add_tag_attributes("input", ["type", "checked", "disabled"])
+        .add_tag_attributes("source", ["src", "srcset", "type", "media"])
+        .add_tag_attributes(
+            "video",
+            ["src", "controls", "width", "height", "loop", "muted"],
+        )
+        .add_tag_attributes("audio", ["src", "controls", "loop"])
+        .url_schemes(HashSet::from(["http", "https", "mailto"]))
+        .link_rel(None);
         b
     })
 }

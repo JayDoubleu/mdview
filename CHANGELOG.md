@@ -13,6 +13,9 @@
 - Files in Windows-1252, UTF-16 or UTF-8 with a BOM display correctly and are saved back in the same encoding (falling back to UTF-8, with a notice, only if the text no longer fits).
 - Empty files show a short note instead of a blank page; broken Mermaid diagrams show the parser error; slow loads show a "Rendering…" indicator.
 - File tree: each folder shows how many Markdown files it contains, including subfolders.
+- Annotations: right-click a selection (or press Ctrl/Cmd+Alt+M) to attach a note. It is stored in the file as an `<!-- ANNOTATION -->` comment that AI agents can read and act on, and the preview shows it as a card with a Resolve button.
+- Live reload now covers every folder shown in the file tree, not only the open file's folder.
+- Right-clicking no longer shows the webview's Back/Forward/Reload menu.
 
 ## 0.1.0
 

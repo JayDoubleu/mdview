@@ -18,10 +18,28 @@ mdview                # browse the current folder
 - **File tree** on the left. It opens at the file's folder. Click a folder to expand it, double-click it (or use a breadcrumb) to make it the root, and use ↑ or <kbd>Backspace</kbd> to go up a level. The 👁 button shows non-Markdown files too. Each folder shows a badge with how many Markdown files it holds, subfolders included (0 means none).
 - **Source pane** on the right (<kbd>Ctrl/Cmd+E</kbd>). It shows the raw Markdown with line numbers and highlighting, and scrolls in sync with the preview. Selection works both ways. Select or click lines in it to highlight the matching blocks in the preview, or select text in the preview to highlight the matching source text.
 - **Basic editing.** Click **Edit** to unlock the file. The source pane becomes a plain text editor, and the preview updates as you type. Nothing is written until you click **Save** (<kbd>Ctrl/Cmd+S</kbd>). Until then an amber *Unsaved* marker, a banner over the preview and a dot in the window title show that the preview isn't what's on disk. **Discard** reverts to the saved file (with an Undo). Locking, switching files or closing with unsaved changes asks whether to save or discard them. The editor has line numbers and highlights the cursor line or selected lines, and the preview gently highlights the matching blocks. Selecting text in the preview selects the matching text in the editor, and clicking in the preview moves the editor's cursor there.
-- **Live reload.** When you save the file in your editor, the preview refreshes and keeps your scroll position.
+- **Annotations for AI agents.** Select text in the preview, editor or source pane, right-click and choose **Annotate selection…** (<kbd>Ctrl/Cmd+Alt+M</kbd>), then type a note. The note goes into the file as an HTML comment above the block you selected. See [Annotations](#annotations). The preview shows each note as a card with a **Resolve** button that removes it. Like any edit, notes are only written when you click Save.
+- **Live reload.** When another program changes the open file, the preview refreshes and keeps your scroll position. Folders shown in the tree update too.
 - Light and dark themes (follows the OS; toggle with <kbd>Ctrl/Cmd+L</kbd>), zoom, find-in-page, back/forward history, and drag-and-drop to open a file.
 - Relative links to other `.md` files open inside mdview. Web links open in your browser. Local images load as you'd expect.
 - About 10 MB as a single binary. It uses the system webview (WebView2, WKWebView or WebKitGTK), so nothing like Electron gets bundled.
+
+## Annotations
+
+Annotations let you mark up a document for someone else to act on, typically an AI coding agent. Each note is stored as an HTML comment just above the block it refers to. GitHub and other Markdown viewers hide it, while anything that reads the file sees it plainly:
+
+```markdown
+<!-- ANNOTATION
+Selected: "ship the **new parser** next week"
+Note: Check the date with the security team first
+-->
+
+We will ship the **new parser** next week, after the security review is done.
+```
+
+A selection over several lines is quoted with `> ` lines. To hand the notes to an agent, save the file and ask something like:
+
+> Work through every `<!-- ANNOTATION -->` comment in docs/plan.md. Apply each note to the selected text, then delete the comment.
 
 ## Install
 

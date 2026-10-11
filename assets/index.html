@@ -72,6 +72,23 @@
     </div>
   </div>
 </div>
+<div id="ctx-menu" class="ctx-menu" role="menu" hidden>
+  <button id="ctx-annotate" role="menuitem"><span>Annotate selection…</span><kbd>Ctrl+Alt+M</kbd></button>
+  <button id="ctx-copy" role="menuitem"><span>Copy</span><kbd>Ctrl+C</kbd></button>
+</div>
+<div id="annotate" class="modal" hidden>
+  <div class="modal-box annotate-box" role="dialog" aria-modal="true" aria-labelledby="annotate-title">
+    <h3 id="annotate-title">Annotate</h3>
+    <div id="annotate-quote" class="annotate-quote"></div>
+    <textarea id="annotate-note" rows="4" placeholder="What should change here? For example: make this more concise."></textarea>
+    <p class="annotate-hint">Added to the file as a comment that AI agents can read and other Markdown viewers hide. Save the file to keep it.</p>
+    <div class="modal-actions">
+      <span class="spacer"></span>
+      <button id="annotate-cancel">Cancel</button>
+      <button id="annotate-ok" class="primary">Add note</button>
+    </div>
+  </div>
+</div>
 <script src="app.js"></script>
 </body>
 </html>

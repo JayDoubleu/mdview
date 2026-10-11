@@ -195,6 +195,7 @@
     tree.innerHTML = "";
     await fillDir(tree, S.root, 0);
     if (S.file) await revealInTree(S.file);
+    syncWatches();
   }
 
   async function fillDir(ul, dir, depth) {
@@ -273,6 +274,7 @@
     if (li.classList.contains("open") && !forceOpen) {
       li.classList.remove("open");
       if (sub) sub.hidden = true;
+      syncWatches();
       return;
     }
     li.classList.add("open");
@@ -282,6 +284,7 @@
       await fillDir(sub, li.dataset.path, depth + 1);
     }
     sub.hidden = false;
+    syncWatches();
   }
 
   async function revealInTree(file) {
@@ -313,6 +316,22 @@
     }
   }
 
+  // Watch every folder the tree shows, plus the open file's folder, so
+  // changes made by other programs appear without a manual refresh.
+  let watchTimer = 0;
+  function syncWatches() {
+    clearTimeout(watchTimer);
+    watchTimer = setTimeout(() => {
+      const dirs = new Set();
+      if (S.root) dirs.add(S.root);
+      if (S.file) dirs.add(dirname(S.file));
+      for (const li of tree.querySelectorAll("li.dir.open")) {
+        if (!li.parentElement.closest("li.dir:not(.open)")) dirs.add(li.dataset.path);
+      }
+      ipc("watch", JSON.stringify([...dirs]));
+    }, 50);
+  }
+
   async function refreshDir(dir) {
     const ul = samePath(dir, S.root) ? tree : [...tree.querySelectorAll("ul")].find((u) => samePath(u.dataset.path, dir));
     if (!ul) return;
@@ -325,6 +344,14 @@
     }
     tree.scrollTop = scroll;
     markCurrent();
+  }
+
+  // Folder badges above a changed folder count its files too.
+  function refreshCounts(dir) {
+    for (const ul of [tree, ...tree.querySelectorAll("ul")]) {
+      const p = ul.dataset.path;
+      if (p && !samePath(p, dir) && isUnder(dir, p)) loadCounts(ul, p);
+    }
   }
 
   // ---------- document ----------
@@ -380,7 +407,7 @@
     setDocPath(doc.path);
     S.docName = doc.name;
     updateDirtyUI();
-    ipc("watch", doc.dir);
+    syncWatches();
 
     if (!isUnder(doc.path, S.root) && changed) setRoot(doc.dir);
     else if (changed) revealInTree(doc.path);
@@ -447,6 +474,15 @@
         setTimeout(() => (b.textContent = "Copy"), 1200);
       };
       pre.append(b);
+    }
+    // Annotation cards: a Resolve button removes the note from the file.
+    for (const card of preview.querySelectorAll("aside.annotation[data-sourcepos]")) {
+      const bar = el("div", "annotation-actions");
+      const b = el("button", null, "Resolve");
+      b.title = "Remove this note from the file (Save to keep the change)";
+      b.onclick = (e) => { e.stopPropagation(); resolveAnnotation(card); };
+      bar.append(b);
+      card.append(bar);
     }
     renderMath();
     renderMermaid();
@@ -689,8 +725,7 @@
   let pendingFile = false;
   function fsChanged(paths) {
     for (const p of paths) {
-      // Only the current file's folder is watched, so a name match is enough.
-      if (S.file && basename(p) === basename(S.file)) pendingFile = true;
+      if (S.file && basename(p) === basename(S.file) && samePath(dirname(p), dirname(S.file))) pendingFile = true;
       pendingDirs.add(dirname(p));
     }
     clearTimeout(fsTimer);
@@ -703,7 +738,7 @@
           await openFile(S.file, { push: false, keepScroll: true });
         }
       }
-      for (const d of pendingDirs) refreshDir(d);
+      for (const d of pendingDirs) refreshDir(d).then(() => refreshCounts(d));
       pendingDirs.clear();
     }, 120);
   }
@@ -770,7 +805,7 @@
   // selections in the read-only source pane.
   let curRange = "";
   let cursorRaf = 0;
-  const BLOCKS = "p,li,h1,h2,h3,h4,h5,h6,pre,blockquote,tr,dt,dd,hr,table,.markdown-alert,.math-display,.mermaid,.front-matter";
+  const BLOCKS = "p,li,h1,h2,h3,h4,h5,h6,pre,blockquote,tr,dt,dd,hr,table,.markdown-alert,.math-display,.mermaid,.front-matter,.annotation";
 
   function lineAt(text, pos) {
     let n = 1;
@@ -925,13 +960,27 @@
     const r = document.createRange();
     r.setStart(root, 0);
     try { r.setEnd(node, offset); } catch { return from; }
-    return followText(r.toString(), text, from, to);
+    const before = r.toString();
+    const k = followText(before, text, from, to);
+    // At the very start of a block, skip its syntax (`- `, `# `, `> `, `| `)
+    // and start at the first visible character.
+    if (!isEnd && !before.trim()) {
+      const after = document.createRange();
+      after.selectNodeContents(root);
+      try { after.setStart(node, offset); } catch { return k; }
+      const c = after.toString().trimStart()[0];
+      const j = c ? text.indexOf(c, k) : -1;
+      if (j !== -1 && j < to) return j;
+    }
+    return k;
   }
 
-  function previewSelectionRange(text) {
-    const sel = window.getSelection();
-    if (!sel || !sel.rangeCount) return null;
-    const range = sel.getRangeAt(0);
+  function previewSelectionRange(text, range) {
+    if (!range) {
+      const sel = window.getSelection();
+      if (!sel || !sel.rangeCount) return null;
+      range = sel.getRangeAt(0);
+    }
     if (!preview.contains(range.commonAncestorContainer)) return null;
     // A re-render resets the selection to the top; that's not a user pick.
     if (range.collapsed && range.startContainer === preview) return null;
@@ -1220,6 +1269,192 @@
     setTimeout(() => t.remove(), 8000);
   }
 
+  // ---------- annotations ----------
+  // A note on a selection, stored in the file as an HTML comment just above
+  // the block it belongs to (see src/annotations.rs for the format).
+
+  // What is selected right now, in source terms where that's known already.
+  function annotationTarget() {
+    if (S.editing && editor.selectionStart < editor.selectionEnd) {
+      const sel = window.getSelection();
+      const inPreview = sel && sel.rangeCount && !sel.isCollapsed && preview.contains(sel.getRangeAt(0).commonAncestorContainer);
+      if (document.activeElement === editor || inPreview) {
+        return { s: editor.selectionStart, e: editor.selectionEnd, text: editor.value };
+      }
+    }
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount || sel.isCollapsed) return null;
+    const r = sel.getRangeAt(0);
+    if (preview.contains(r.commonAncestorContainer)) return { range: r.cloneRange() };
+    const code = $("#source-code");
+    if (!S.editing && code.contains(r.commonAncestorContainer)) {
+      const before = document.createRange();
+      before.setStart(code, 0);
+      before.setEnd(r.startContainer, r.startOffset);
+      const start = before.toString().length;
+      return { s: start, e: start + r.toString().length, text: code.textContent };
+    }
+    return null;
+  }
+
+  async function annotate(t) {
+    if (!S.file) return;
+    if (t.range) {
+      let raw;
+      try { raw = await readRaw(S.file); } catch (e) { return showToast(String(e.message || e)); }
+      const r = previewSelectionRange(raw, t.range);
+      if (!r) return showToast("Couldn't find that selection in the source");
+      t = { s: r[0], e: r[1], text: raw };
+    }
+    // Whole words make a better anchor than "l ship the ne".
+    const word = /[\p{L}\p{N}_]/u;
+    while (t.s > 0 && word.test(t.text[t.s - 1]) && word.test(t.text[t.s])) t.s--;
+    while (t.e < t.text.length && word.test(t.text[t.e]) && word.test(t.text[t.e - 1])) t.e++;
+    const quote = t.text.slice(t.s, t.e).replace(/\s+$/, "");
+    if (!quote.trim()) return showToast("Select some text to annotate");
+    const note = await askNote(quote);
+    if (!note) return;
+    if (!S.editing) {
+      await enterEdit();
+      if (!S.editing) return;
+    }
+    // The file may differ from what was selected in (e.g. line endings): find
+    // the quote again, nearest to where it was.
+    const text = editor.value;
+    let at = t.s;
+    if (text.slice(at, at + quote.length) !== quote) {
+      let best = -1;
+      for (let i = text.indexOf(quote); i !== -1; i = text.indexOf(quote, i + 1)) {
+        if (best < 0 || Math.abs(i - t.s) < Math.abs(best - t.s)) best = i;
+      }
+      if (best >= 0) at = best;
+    }
+    insertAnnotation(Math.min(at, text.length), quote, note);
+  }
+
+  function annotationText(quote, note) {
+    const safe = (x) => x.replace(/-->/g, "-- >");
+    let q = quote;
+    if (q.length > 400) q = q.slice(0, 220) + " … " + q.slice(-150);
+    q = safe(q);
+    const selected = q.includes("\n")
+      ? "Selected:\n" + q.split("\n").map((l) => "> " + l).join("\n")
+      : `Selected: "${q}"`;
+    return `<!-- ANNOTATION\n${selected}\nNote: ${safe(note.trim())}\n-->`;
+  }
+
+  // Puts the note above the top-level block holding offset `at`, so it never
+  // lands inside a list, table or code block.
+  function insertAnnotation(at, quote, note) {
+    const text = editor.value;
+    const line = lineAt(text, at);
+    let target = line;
+    for (const n of preview.children) {
+      const pos = parsePos(n.dataset.sourcepos);
+      if (!pos) continue;
+      if (pos[0] > line) break;
+      if (line <= pos[1]) target = n.matches(".front-matter") ? pos[1] + 1 : pos[0];
+    }
+    const pos = textOffset(text, target, 1);
+    const prevStart = text.lastIndexOf("\n", pos - 2) + 1;
+    let insert = annotationText(quote, note);
+    if (pos > 0 && text[pos - 1] !== "\n") insert = "\n\n" + insert;
+    else if (pos > 0 && text.slice(prevStart, pos).trim()) insert = "\n" + insert;
+    insert += pos < text.length ? "\n\n" : "\n";
+    editor.focus({ preventScroll: true });
+    editor.setSelectionRange(pos, pos);
+    if (!document.execCommand("insertText", false, insert)) {
+      editor.setRangeText(insert, pos, pos, "end");
+      onEdit();
+    }
+    revealSourceLine(lineAt(editor.value, pos));
+    showToast("Note added. Save to keep it in the file.", false);
+  }
+
+  async function resolveAnnotation(card) {
+    const pos = parsePos(card.dataset.sourcepos);
+    if (!pos) return;
+    if (!S.editing) {
+      await enterEdit();
+      if (!S.editing) return;
+    }
+    const text = editor.value;
+    const a = textOffset(text, pos[0], 1);
+    let b = Math.min(text.length, textOffset(text, pos[1] + 1, 1));
+    if (!text.startsWith("<!-- ANNOTATION", a)) return showToast("Couldn't find this note in the file");
+    // Take the blank line after it too.
+    const next = text.indexOf("\n", b);
+    if (b < text.length && !text.slice(b, next === -1 ? text.length : next).trim()) b = next === -1 ? text.length : next + 1;
+    editor.focus({ preventScroll: true });
+    editor.setSelectionRange(a, b);
+    if (!document.execCommand("delete")) {
+      editor.setRangeText("", a, b, "end");
+      onEdit();
+    }
+  }
+
+  function askNote(quote) {
+    const modal = $("#annotate");
+    const input = $("#annotate-note");
+    const ok = $("#annotate-ok");
+    $("#annotate-quote").textContent = quote.length > 600 ? quote.slice(0, 600) + " …" : quote;
+    input.value = "";
+    ok.disabled = true;
+    modal.hidden = false;
+    input.focus();
+    return new Promise((resolve) => {
+      const done = (value) => {
+        modal.hidden = true;
+        modal.onkeydown = null;
+        resolve(value);
+      };
+      input.oninput = () => (ok.disabled = !input.value.trim());
+      ok.onclick = () => input.value.trim() && done(input.value);
+      $("#annotate-cancel").onclick = () => done(null);
+      modal.onclick = (e) => { if (e.target === modal) done(null); };
+      modal.onkeydown = (e) => {
+        if (e.key === "Escape") { e.preventDefault(); done(null); }
+        else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); ok.onclick(); }
+        e.stopPropagation();
+      };
+    });
+  }
+
+  // Right-click on a selection: Annotate / Copy.
+  const ctxMenu = $("#ctx-menu");
+  if (/Mac/.test(navigator.platform)) {
+    const keys = ctxMenu.querySelectorAll("kbd");
+    keys[0].textContent = "⌥⌘M";
+    keys[1].textContent = "⌘C";
+  }
+  let ctxTarget = null;
+  const hideCtx = () => { ctxMenu.hidden = true; ctxTarget = null; };
+  document.addEventListener("contextmenu", (e) => {
+    hideCtx();
+    // The webview's own menu (Back, Reload…) means nothing here; keep it only
+    // for text fields, where it offers cut and paste.
+    const field = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement;
+    const t = S.file && e.target.closest?.("#preview, #editor, #source-code") ? annotationTarget() : null;
+    if (!t) {
+      if (!field) e.preventDefault();
+      return;
+    }
+    e.preventDefault();
+    ctxTarget = t;
+    ctxMenu.hidden = false;
+    const w = ctxMenu.offsetWidth, h = ctxMenu.offsetHeight;
+    ctxMenu.style.left = Math.min(e.clientX, window.innerWidth - w - 4) + "px";
+    ctxMenu.style.top = Math.min(e.clientY, window.innerHeight - h - 4) + "px";
+  });
+  // Keep the selection while clicking the menu.
+  ctxMenu.addEventListener("mousedown", (e) => e.preventDefault());
+  $("#ctx-annotate").onclick = () => { const t = ctxTarget; hideCtx(); if (t) annotate(t); };
+  $("#ctx-copy").onclick = () => { hideCtx(); document.execCommand("copy"); };
+  document.addEventListener("mousedown", (e) => { if (!ctxMenu.hidden && !ctxMenu.contains(e.target)) hideCtx(); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !ctxMenu.hidden) hideCtx(); }, true);
+  window.addEventListener("blur", hideCtx);
+  for (const pane of [previewPane, sourcePane]) pane.addEventListener("scroll", () => ctxMenu.hidden || hideCtx(), { passive: true });
+
   // Called by the app when the window is closing with unsaved edits.
   async function requestClose() {
     if (await confirmLeave()) ipc("quit");
@@ -1258,7 +1493,8 @@
     const mod = e.ctrlKey || e.metaKey;
     const k = e.key.toLowerCase();
     const typing = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement;
-    if (!$("#modal").hidden) return;
+    if (!$("#modal").hidden || !$("#annotate").hidden) return;
+    if (mod && e.altKey && k === "m") { e.preventDefault(); const t = annotationTarget(); if (t) annotate(t); else showToast("Select some text to annotate"); return; }
     if (mod && k === "b") { e.preventDefault(); toggleTree(); }
     else if (mod && k === "e") { e.preventDefault(); toggleSource(); }
     else if (mod && k === "f") { e.preventDefault(); openFind(); }
@@ -1335,7 +1571,7 @@
     S.sep = info.sep;
     S.root = info.root;
     renderCrumbs();
-    ipc("watch", info.root);
+    syncWatches();
     if (info.file) {
       await openFile(info.file);
       loadTree();

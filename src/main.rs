@@ -4,6 +4,7 @@
     windows_subsystem = "windows"
 )]
 
+mod annotations;
 mod render;
 mod server;
 mod text;
@@ -40,7 +41,7 @@ KEYS (Cmd on macOS):
 
 enum UserEvent {
     Title(String),
-    Watch(PathBuf),
+    Watch(Vec<PathBuf>),
     FsChanged(Vec<PathBuf>),
     Dropped(Vec<PathBuf>),
     /// The page has (or no longer has) unsaved edits.
@@ -254,7 +255,8 @@ fn main() -> wry::Result<()> {
     };
 
     let mut watcher = make_watcher(proxy.clone());
-    let mut watched: Option<PathBuf> = None;
+    // Folders shown in the tree plus the open file's folder.
+    let mut watched: Vec<PathBuf> = Vec::new();
 
     let mut dirty = false;
 
@@ -277,14 +279,20 @@ fn main() -> wry::Result<()> {
             Event::UserEvent(UserEvent::Dirty(d)) => dirty = d,
             Event::UserEvent(UserEvent::Reply(v)) => send_js(&webview, "reply", v),
             Event::UserEvent(UserEvent::Title(t)) => window.set_title(&t),
-            Event::UserEvent(UserEvent::Watch(dir)) => {
+            Event::UserEvent(UserEvent::Watch(dirs)) => {
                 if let Some(w) = watcher.as_mut() {
-                    if watched.as_ref() != Some(&dir) {
-                        if let Some(old) = watched.take() {
-                            let _ = w.unwatch(&old);
+                    watched.retain(|d| {
+                        let keep = dirs.contains(d);
+                        if !keep {
+                            let _ = w.unwatch(d);
                         }
-                        if w.watch(&dir, RecursiveMode::NonRecursive).is_ok() {
-                            watched = Some(dir);
+                        keep
+                    });
+                    for dir in dirs {
+                        if !watched.contains(&dir)
+                            && w.watch(&dir, RecursiveMode::NonRecursive).is_ok()
+                        {
+                            watched.push(dir);
                         }
                     }
                 }
@@ -402,7 +410,13 @@ fn handle_ipc(proxy: &EventLoopProxy<UserEvent>, body: &str) {
             let _ = proxy.send_event(UserEvent::Title(arg.to_string()));
         }
         Some("watch") => {
-            let _ = proxy.send_event(UserEvent::Watch(PathBuf::from(arg)));
+            let dirs: Vec<PathBuf> = serde_json::from_str::<Vec<String>>(arg)
+                .unwrap_or_default()
+                .into_iter()
+                .take(MAX_WATCHED)
+                .map(PathBuf::from)
+                .collect();
+            let _ = proxy.send_event(UserEvent::Watch(dirs));
         }
         // Links in documents: web and mail URLs only.
         Some("open_url") if server::is_web_url(arg) => {
@@ -452,6 +466,9 @@ fn reply(proxy: &EventLoopProxy<UserEvent>, msg: &Value, data: Value) {
     let id = msg.get("id").cloned().unwrap_or(Value::Null);
     let _ = proxy.send_event(UserEvent::Reply(json!({ "id": id, "data": data })));
 }
+
+/// Expanding many folders shouldn't exhaust the OS's watch handles.
+const MAX_WATCHED: usize = 64;
 
 fn make_watcher(proxy: EventLoopProxy<UserEvent>) -> Option<RecommendedWatcher> {
     notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
