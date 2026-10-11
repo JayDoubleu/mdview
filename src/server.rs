@@ -52,6 +52,8 @@ pub fn handle(launch: &Launch, req: Request<Vec<u8>>) -> Resp {
         "/api/list" => list(q("path").unwrap_or("."), q("all") == Some("1")),
         "/api/render" => render_file(q("path").unwrap_or("")),
         "/api/source" => source_file(q("path").unwrap_or("")),
+        "/api/raw" => read_text(q("path").unwrap_or(""))
+            .map(|(_, text)| respond("text/plain; charset=utf-8", Cow::Owned(text.into_bytes()))),
         "/api/resolve" => Ok(json_resp(resolve(
             q("base").unwrap_or(""),
             q("rel").unwrap_or(""),
@@ -245,6 +247,23 @@ fn local_file(base: &str, rel: &str) -> Res {
     Ok(resp)
 }
 
+/// Saves edited text over an existing Markdown file, keeping its line endings.
+/// Only Markdown files that already exist can be written.
+pub fn save_file(p: &Path, text: &str) -> Result<(), String> {
+    let meta = fs::metadata(p).map_err(|e| format!("{}: {e}", p.display()))?;
+    if !meta.is_file() || !is_markdown(p) {
+        return Err(format!("{} is not a Markdown file", p.display()));
+    }
+    let old = fs::read(p).unwrap_or_default();
+    let text = text.replace("\r\n", "\n");
+    let body = if old.windows(2).any(|w| w == b"\r\n") {
+        text.replace('\n', "\r\n")
+    } else {
+        text
+    };
+    fs::write(p, body).map_err(|e| format!("{}: {e}", p.display()))
+}
+
 /// Whether a link target is a URL the OS may open (web or mail only).
 pub fn is_web_url(url: &str) -> bool {
     let lower = url.trim_start().to_ascii_lowercase();
@@ -285,6 +304,28 @@ mod tests {
                 .iter()
                 .any(|(n, _)| *n == "vendor/katex/katex.min.css")
         );
+    }
+
+    #[test]
+    fn save_keeps_line_endings_and_refuses_non_markdown() {
+        let dir = std::env::temp_dir().join(format!("mdview-save-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let crlf = dir.join("crlf.md");
+        fs::write(&crlf, "a\r\nb\r\n").unwrap();
+        save_file(&crlf, "x\ny\n").unwrap();
+        assert_eq!(fs::read_to_string(&crlf).unwrap(), "x\r\ny\r\n");
+
+        let lf = dir.join("lf.md");
+        fs::write(&lf, "a\n").unwrap();
+        save_file(&lf, "z\n").unwrap();
+        assert_eq!(fs::read_to_string(&lf).unwrap(), "z\n");
+
+        let txt = dir.join("notes.txt");
+        fs::write(&txt, "keep").unwrap();
+        assert!(save_file(&txt, "nope").is_err());
+        assert_eq!(fs::read_to_string(&txt).unwrap(), "keep");
+        assert!(save_file(&dir.join("missing.md"), "x").is_err());
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

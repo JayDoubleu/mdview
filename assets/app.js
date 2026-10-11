@@ -28,6 +28,7 @@
     caret: svg('<path d="M6 4l4 4-4 4"/>'),
     folder: svg('<path d="M1.75 4.25a1 1 0 0 1 1-1h3.5l1.5 1.5h5.5a1 1 0 0 1 1 1v6.5a1 1 0 0 1-1 1H2.75a1 1 0 0 1-1-1z"/>'),
     md: svg('<path d="M3.75 1.75h6l3.5 3.5v8a1 1 0 0 1-1 1h-8.5a1 1 0 0 1-1-1v-10.5a1 1 0 0 1 1-1z"/><path d="M9.5 1.75v3.5h3.5"/><path d="M5 12V8.5l1.5 1.75L8 8.5V12"/><path d="M10.5 8.5V12M9.25 10.75l1.25 1.25 1.25-1.25"/>', 16),
+    pencil: svg('<path d="M11.2 2.3a1.4 1.4 0 0 1 2 0l.5.5a1.4 1.4 0 0 1 0 2L6 12.5l-3 .8.8-3z"/><path d="M10 3.5l2.5 2.5"/>'),
     file: svg('<path d="M3.75 1.75h6l3.5 3.5v8a1 1 0 0 1-1 1h-8.5a1 1 0 0 1-1-1v-10.5a1 1 0 0 1 1-1z"/><path d="M9.5 1.75v3.5h3.5"/>'),
   };
 
@@ -55,6 +56,11 @@
     treeW: store.get("treeW", 260),
     sourceW: store.get("sourceW", null),
     sourceLoadedFor: null,
+    editing: false,
+    dirty: false,
+    savedText: "",
+    docName: "",
+    previewIsBuffer: false, // preview shows the editor buffer, not the file
   };
 
   const ipc = (cmd, arg = "") => {
@@ -103,17 +109,19 @@
 
   function applyLayout() {
     document.body.classList.toggle("no-tree", !S.showTree);
-    document.body.classList.toggle("no-source", !S.showSource);
+    document.body.classList.toggle("no-source", !S.showSource && !S.editing);
     $("#btn-tree").classList.toggle("on", S.showTree);
     $("#btn-source").classList.toggle("on", S.showSource);
     $("#btn-all").classList.toggle("on", S.showAll);
     document.documentElement.style.setProperty("--tree-w", S.treeW + "px");
     if (S.sourceW) document.documentElement.style.setProperty("--source-w", S.sourceW + "px");
-    if (S.showSource) loadSource();
+    if (S.showSource && !S.editing) loadSource();
   }
 
   function toggleTree() { S.showTree = !S.showTree; store.set("showTree", S.showTree); applyLayout(); }
-  function toggleSource() { S.showSource = !S.showSource; store.set("showSource", S.showSource); applyLayout(); syncFromPreview(); }
+  function toggleSource() {
+    if (S.editing) return showToast("The editor replaces the source pane while editing");
+    S.showSource = !S.showSource; store.set("showSource", S.showSource); applyLayout(); syncFromPreview(); }
 
   function splitter(id, onMove) {
     const s = $(id);
@@ -321,6 +329,7 @@
 
   async function openFile(path, opts = {}) {
     const { push = true, anchor = null, keepScroll = false } = opts;
+    if (!(await confirmLeave())) return false;
     let doc;
     try {
       doc = await api("render", { path });
@@ -338,9 +347,11 @@
     }
     updateNav();
     preview.innerHTML = doc.html;
+    S.previewIsBuffer = false;
     enhance();
     setDocPath(doc.path);
-    ipc("title", `${doc.name} — mdview`);
+    S.docName = doc.name;
+    updateDirtyUI();
     ipc("watch", doc.dir);
 
     if (!isUnder(doc.path, S.root) && changed) setRoot(doc.dir);
@@ -351,18 +362,24 @@
     else previewPane.scrollTop = 0;
 
     S.sourceLoadedFor = null;
-    if (S.showSource) await loadSource(keepScroll);
+    if (S.editing) await loadEditor(keepScroll);
+    else if (S.showSource) await loadSource(keepScroll);
+    return true;
   }
 
   function updateNav() {
     $("#btn-back").disabled = S.hIndex <= 0;
     $("#btn-fwd").disabled = S.hIndex >= S.history.length - 1;
   }
-  function go(delta) {
+  async function go(delta) {
     const i = S.hIndex + delta;
     if (i < 0 || i >= S.history.length) return;
+    const prev = S.hIndex;
     S.hIndex = i;
-    openFile(S.history[i], { push: false });
+    if (!(await openFile(S.history[i], { push: false }))) {
+      S.hIndex = prev;
+      updateNav();
+    }
   }
 
   const EXTERNAL = /^[a-z][a-z0-9+.-]*:/i;
@@ -499,8 +516,8 @@
     else showToast(`Not found: ${pathPart}`);
   });
 
-  function showToast(msg) {
-    const t = el("div", "state error", msg);
+  function showToast(msg, isError = true) {
+    const t = el("div", "state" + (isError ? " error" : ""), msg);
     t.style.cssText = "position:fixed;bottom:16px;left:50%;transform:translateX(-50%);margin:0;padding:8px 14px;border-radius:8px;background:var(--bg);border:1px solid var(--border);box-shadow:0 8px 24px rgba(0,0,0,.15);z-index:20";
     document.body.append(t);
     setTimeout(() => t.remove(), 2500);
@@ -545,7 +562,7 @@
       const pos = parsePos(n.dataset.sourcepos);
       if (pos) anchors.push({ top: n.offsetTop, height: n.offsetHeight, start: pos[0], end: pos[1] });
     }
-    lineH = parseFloat(getComputedStyle($("#source")).lineHeight) || 20;
+    lineH = parseFloat(getComputedStyle(S.editing ? editor : $("#source")).lineHeight) || 20;
     return anchors;
   }
   const invalidateAnchors = () => (anchors = null);
@@ -568,7 +585,7 @@
   sourcePane.addEventListener("wheel", () => (driver = "source"), { passive: true });
 
   function syncFromPreview() {
-    if (!S.showSource) return;
+    if (!S.showSource && !S.editing) return;
     const y = previewPane.scrollTop;
     if (y <= 0) return void (sourcePane.scrollTop = 0);
     const list = getAnchors();
@@ -593,7 +610,7 @@
 
   let raf = 0;
   previewPane.addEventListener("scroll", () => {
-    if (!S.showSource || driver !== "preview" || raf) return;
+    if (!(S.showSource || S.editing) || driver !== "preview" || raf) return;
     raf = requestAnimationFrame(() => { raf = 0; syncFromPreview(); });
   }, { passive: true });
   sourcePane.addEventListener("scroll", () => {
@@ -641,8 +658,11 @@
     fsTimer = setTimeout(async () => {
       if (pendingFile && S.file) {
         pendingFile = false;
-        S.sourceLoadedFor = null;
-        await openFile(S.file, { push: false, keepScroll: true });
+        if (S.editing) await diskChangedWhileEditing();
+        else {
+          S.sourceLoadedFor = null;
+          await openFile(S.file, { push: false, keepScroll: true });
+        }
       }
       for (const d of pendingDirs) refreshDir(d);
       pendingDirs.clear();
@@ -656,22 +676,241 @@
     else showToast("Not a Markdown file: " + basename(path));
   }
 
-  window.mdview = { fsChanged, openPath };
+  // ---------- edit mode ----------
+  // The editor works on a buffer. The preview renders that buffer live, but
+  // nothing touches the file until Save; the toolbar pill, the banner over the
+  // preview and the dot in the title show when the buffer differs from disk.
+  const editor = $("#editor");
+  let rpcSeq = 0;
+  const rpcPending = new Map();
+
+  // Requests answered by the app through `mdview.reply` (large text goes over IPC).
+  function rpc(cmd, arg, extra = {}) {
+    const id = ++rpcSeq;
+    return new Promise((resolve) => {
+      rpcPending.set(id, resolve);
+      try { window.ipc.postMessage(JSON.stringify({ cmd, arg, id, ...extra })); }
+      catch { rpcPending.delete(id); resolve(null); }
+    });
+  }
+  function reply({ id, data }) {
+    const resolve = rpcPending.get(id);
+    rpcPending.delete(id);
+    if (resolve) resolve(data);
+  }
+
+  async function readRaw(path) {
+    const r = await fetch(`api/raw?${new URLSearchParams({ path })}`);
+    if (!r.ok) throw new Error(await r.text());
+    // Textareas use \n; compare and edit in that form.
+    return (await r.text()).replace(/\r\n?/g, "\n");
+  }
+
+  function fitEditor() {
+    editor.style.height = "auto";
+    editor.style.height = editor.scrollHeight + "px";
+  }
+
+  async function loadEditor(keepScroll = false) {
+    const scroll = sourcePane.scrollTop;
+    try {
+      S.savedText = await readRaw(S.file);
+    } catch (e) {
+      showToast(String(e.message || e));
+      return leaveEdit(true);
+    }
+    editor.value = S.savedText;
+    fitEditor();
+    setDirty(false);
+    if (keepScroll) sourcePane.scrollTop = scroll;
+    else syncFromPreview();
+  }
+
+  async function enterEdit() {
+    if (!S.file) return showToast("Open a Markdown file to edit it");
+    S.editing = true;
+    document.body.classList.add("editing");
+    editor.hidden = false;
+    $("#btn-edit").classList.add("on");
+    $("#btn-edit .label").textContent = "Editing";
+    $("#btn-edit").title = "Lock editing";
+    applyLayout();
+    await loadEditor();
+    editor.setSelectionRange(0, 0);
+    editor.focus({ preventScroll: true });
+    driver = "preview";
+    syncFromPreview();
+  }
+
+  async function leaveEdit(force = false) {
+    if (!force && !(await confirmLeave())) return;
+    const restore = S.previewIsBuffer;
+    S.previewIsBuffer = false;
+    S.editing = false;
+    setDirty(false);
+    editor.hidden = true;
+    editor.value = "";
+    document.body.classList.remove("editing");
+    $("#btn-edit").classList.remove("on");
+    $("#btn-edit .label").textContent = "Edit";
+    $("#btn-edit").title = "Unlock editing";
+    applyLayout();
+    // Show the file as it is on disk again.
+    if (restore && S.file) await openFile(S.file, { push: false, keepScroll: true });
+  }
+
+  function setDirty(dirty) {
+    if (S.dirty === dirty) return;
+    S.dirty = dirty;
+    updateDirtyUI();
+    ipc("dirty", dirty ? "1" : "0");
+  }
+
+  function updateDirtyUI() {
+    document.body.classList.toggle("dirty", S.dirty);
+    $("#unsaved").hidden = !S.dirty;
+    $("#btn-save").hidden = !S.dirty;
+    $("#draft-banner").hidden = !S.dirty;
+    if (S.docName) ipc("title", `${S.dirty ? "● " : ""}${S.docName} — mdview`);
+  }
+
+  let renderTimer = 0;
+  let renderSeq = 0;
+  function onEdit() {
+    fitEditor();
+    setDirty(editor.value !== S.savedText);
+    clearTimeout(renderTimer);
+    renderTimer = setTimeout(renderBuffer, 120);
+  }
+
+  async function renderBuffer() {
+    const seq = ++renderSeq;
+    const res = await rpc("render_text", editor.value);
+    if (!res || seq !== renderSeq || !S.editing) return;
+    const scroll = previewPane.scrollTop;
+    preview.innerHTML = res.html;
+    enhance();
+    previewPane.scrollTop = scroll;
+    S.previewIsBuffer = true;
+    revealCaret();
+  }
+
+  // Keep the block being typed into visible in the preview.
+  function revealCaret() {
+    if (document.activeElement !== editor) return;
+    const line = editor.value.slice(0, editor.selectionStart).split("\n").length;
+    const list = getAnchors();
+    const i = lastAtOrBefore(list, line, "start");
+    if (i < 0) return;
+    const a = list[i];
+    const view = previewPane.clientHeight;
+    const top = previewPane.scrollTop;
+    if (a.top < top + 40 || a.top + Math.min(a.height, view / 2) > top + view) {
+      previewPane.scrollTop = Math.max(0, a.top - view / 3);
+    }
+  }
+
+  async function save() {
+    if (!S.editing || !S.file) return false;
+    const text = editor.value;
+    const res = await rpc("save", text, { path: S.file });
+    if (!res || !res.ok) {
+      showToast(`Couldn't save: ${(res && res.error) || "unknown error"}`);
+      return false;
+    }
+    S.savedText = text;
+    setDirty(editor.value !== S.savedText);
+    showToast("Saved", false);
+    return true;
+  }
+
+  // Resolves true when it's fine to drop the buffer (saved, discarded or clean).
+  async function confirmLeave() {
+    if (!S.dirty) return true;
+    const choice = await askUnsaved();
+    if (choice === "save") return save();
+    if (choice === "discard") {
+      editor.value = S.savedText;
+      setDirty(false);
+      return true;
+    }
+    editor.focus();
+    return false;
+  }
+
+  function askUnsaved() {
+    const modal = $("#modal");
+    $("#modal-text").textContent =
+      `Your changes to ${S.docName || "this file"} haven't been saved. If you continue without saving, they will be lost.`;
+    modal.hidden = false;
+    $("#modal-cancel").focus();
+    return new Promise((resolve) => {
+      const done = (choice) => {
+        modal.hidden = true;
+        modal.onkeydown = null;
+        resolve(choice);
+      };
+      $("#modal-save").onclick = () => done("save");
+      $("#modal-discard").onclick = () => done("discard");
+      $("#modal-cancel").onclick = () => done("cancel");
+      modal.onclick = (e) => { if (e.target === modal) done("cancel"); };
+      modal.onkeydown = (e) => {
+        if (e.key === "Escape") { e.preventDefault(); done("cancel"); }
+        e.stopPropagation();
+      };
+    });
+  }
+
+  async function diskChangedWhileEditing() {
+    let disk;
+    try { disk = await readRaw(S.file); } catch { return; }
+    if (disk === S.savedText) return; // our own save, or no real change
+    if (!S.dirty) {
+      await loadEditor(true);
+      renderBuffer();
+    } else {
+      S.savedText = disk;
+      setDirty(editor.value !== disk);
+      showToast(`${S.docName} changed on disk. Saving will overwrite those changes.`);
+    }
+  }
+
+  // Called by the app when the window is closing with unsaved edits.
+  async function requestClose() {
+    if (await confirmLeave()) ipc("quit");
+  }
+
+  editor.addEventListener("input", onEdit);
+  // While typing, the preview follows the editor.
+  editor.addEventListener("keydown", () => (driver = "source"));
+  editor.addEventListener("focus", () => (driver = "source"));
+  editor.addEventListener("keydown", (e) => {
+    if (e.key === "Tab" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      // insertText keeps the browser's undo history intact.
+      if (!e.shiftKey) document.execCommand("insertText", false, "    ");
+    }
+  });
+
+  window.mdview = { fsChanged, openPath, reply, requestClose };
 
   // ---------- keyboard ----------
   window.addEventListener("keydown", (e) => {
     const mod = e.ctrlKey || e.metaKey;
     const k = e.key.toLowerCase();
-    const typing = e.target instanceof HTMLInputElement;
+    const typing = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement;
+    if (!$("#modal").hidden) return;
     if (mod && k === "b") { e.preventDefault(); toggleTree(); }
     else if (mod && k === "e") { e.preventDefault(); toggleSource(); }
     else if (mod && k === "f") { e.preventDefault(); openFind(); }
     else if (mod && k === "l") { e.preventDefault(); toggleTheme(); }
+    else if (mod && k === "s") { e.preventDefault(); if (S.editing) save(); }
     else if (mod && k === "r") { e.preventDefault(); if (S.file) { S.sourceLoadedFor = null; openFile(S.file, { push: false, keepScroll: true }); } loadTree(); }
-    else if (mod && (k === "w" || k === "q")) { e.preventDefault(); ipc("quit"); }
+    else if (mod && (k === "w" || k === "q")) { e.preventDefault(); ipc("close"); }
     else if (mod && (k === "=" || k === "+")) { e.preventDefault(); S.zoom = Math.min(2.5, +(S.zoom + 0.1).toFixed(2)); applyZoom(); }
     else if (mod && k === "-") { e.preventDefault(); S.zoom = Math.max(0.5, +(S.zoom - 0.1).toFixed(2)); applyZoom(); }
     else if (mod && k === "0") { e.preventDefault(); S.zoom = 1; applyZoom(); }
+    else if (typing && e.altKey) return;
     else if (e.altKey && e.key === "ArrowLeft") { e.preventDefault(); go(-1); }
     else if (e.altKey && e.key === "ArrowRight") { e.preventDefault(); go(1); }
     else if (e.key === "Escape" && !findbar.hidden) closeFind();
@@ -696,12 +935,15 @@
   $("#btn-all").innerHTML = ICON.eye;
   $("#btn-find").innerHTML = ICON.search;
   $("#btn-source .ico").innerHTML = ICON.code;
+  $("#btn-edit .ico").innerHTML = ICON.pencil;
   $("#find-prev").innerHTML = ICON.chevUp;
   $("#find-next").innerHTML = ICON.chevDown;
   $("#find-close").innerHTML = ICON.close;
 
   $("#btn-tree").onclick = toggleTree;
   $("#btn-source").onclick = toggleSource;
+  $("#btn-edit").onclick = () => (S.editing ? leaveEdit() : enterEdit());
+  $("#btn-save").onclick = save;
   $("#btn-theme").onclick = toggleTheme;
   $("#btn-back").onclick = () => go(-1);
   $("#btn-fwd").onclick = () => go(1);

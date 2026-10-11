@@ -42,6 +42,12 @@ enum UserEvent {
     Watch(PathBuf),
     FsChanged(Vec<PathBuf>),
     Dropped(Vec<PathBuf>),
+    /// The page has (or no longer has) unsaved edits.
+    Dirty(bool),
+    /// Answer to a request from the page, delivered to `mdview.reply`.
+    Reply(Value),
+    /// Close the window, asking the page first if there are unsaved edits.
+    CloseRequested,
     Quit,
 }
 
@@ -194,7 +200,7 @@ fn main() -> wry::Result<()> {
     let mut web_context = WebContext::new(dirs::data_local_dir().map(|d| d.join("mdview")));
 
     #[cfg(target_os = "macos")]
-    let _menu = macos_menu();
+    let _menu = macos_menu(proxy.clone());
 
     let builder = WebViewBuilder::new_with_web_context(&mut web_context)
         .with_custom_protocol("mdview".into(), move |_id, req| {
@@ -243,6 +249,8 @@ fn main() -> wry::Result<()> {
     let mut watcher = make_watcher(proxy.clone());
     let mut watched: Option<PathBuf> = None;
 
+    let mut dirty = false;
+
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
         match event {
@@ -250,9 +258,17 @@ fn main() -> wry::Result<()> {
                 event: WindowEvent::CloseRequested,
                 ..
             }
-            | Event::UserEvent(UserEvent::Quit) => {
-                *control_flow = ControlFlow::Exit;
+            | Event::UserEvent(UserEvent::CloseRequested) => {
+                // With unsaved edits the page asks first and replies with Quit.
+                if dirty {
+                    send_js(&webview, "requestClose", Value::Null);
+                } else {
+                    *control_flow = ControlFlow::Exit;
+                }
             }
+            Event::UserEvent(UserEvent::Quit) => *control_flow = ControlFlow::Exit,
+            Event::UserEvent(UserEvent::Dirty(d)) => dirty = d,
+            Event::UserEvent(UserEvent::Reply(v)) => send_js(&webview, "reply", v),
             Event::UserEvent(UserEvent::Title(t)) => window.set_title(&t),
             Event::UserEvent(UserEvent::Watch(dir)) => {
                 if let Some(w) = watcher.as_mut() {
@@ -304,8 +320,22 @@ fn tune_webkitgtk(webview: &wry::WebView) {
 
 /// macOS needs an application menu for standard shortcuts (Cmd+C, Cmd+A, Cmd+Q...) to work.
 #[cfg(target_os = "macos")]
-fn macos_menu() -> muda::Menu {
-    use muda::{Menu, PredefinedMenuItem as P, Submenu};
+fn macos_menu(proxy: EventLoopProxy<UserEvent>) -> muda::Menu {
+    use muda::accelerator::{Accelerator, Code, Modifiers};
+    use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem as P, Submenu};
+    // A custom Quit (instead of the predefined one, which terminates at once)
+    // so unsaved edits get the same prompt as closing the window.
+    let quit = MenuItem::with_id(
+        "quit",
+        "Quit mdview",
+        true,
+        Some(Accelerator::new(Modifiers::META, Code::KeyQ)),
+    );
+    MenuEvent::set_event_handler(Some(move |e: MenuEvent| {
+        if e.id == "quit" {
+            let _ = proxy.send_event(UserEvent::CloseRequested);
+        }
+    }));
     let app = Submenu::with_items(
         "mdview",
         true,
@@ -316,7 +346,7 @@ fn macos_menu() -> muda::Menu {
             &P::hide_others(None),
             &P::show_all(None),
             &P::separator(),
-            &P::quit(None),
+            &quit,
         ],
     )
     .expect("menu");
@@ -385,11 +415,35 @@ fn handle_ipc(proxy: &EventLoopProxy<UserEvent>, body: &str) {
         Some("open_path") if Path::new(arg).exists() => {
             let _ = open::that_detached(arg);
         }
+        Some("close") => {
+            let _ = proxy.send_event(UserEvent::CloseRequested);
+        }
         Some("quit") => {
             let _ = proxy.send_event(UserEvent::Quit);
         }
+        Some("dirty") => {
+            let _ = proxy.send_event(UserEvent::Dirty(arg == "1"));
+        }
+        // Edit mode: render the unsaved buffer for the live preview.
+        Some("render_text") => {
+            let html = render::markdown(arg);
+            reply(proxy, &msg, json!({ "html": html }));
+        }
+        Some("save") => {
+            let path = msg.get("path").and_then(Value::as_str).unwrap_or("");
+            let result = match server::save_file(Path::new(path), arg) {
+                Ok(()) => json!({ "ok": true }),
+                Err(e) => json!({ "ok": false, "error": e }),
+            };
+            reply(proxy, &msg, result);
+        }
         _ => {}
     }
+}
+
+fn reply(proxy: &EventLoopProxy<UserEvent>, msg: &Value, data: Value) {
+    let id = msg.get("id").cloned().unwrap_or(Value::Null);
+    let _ = proxy.send_event(UserEvent::Reply(json!({ "id": id, "data": data })));
 }
 
 fn make_watcher(proxy: EventLoopProxy<UserEvent>) -> Option<RecommendedWatcher> {

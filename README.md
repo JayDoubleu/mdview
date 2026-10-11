@@ -17,6 +17,7 @@ mdview                # browse the current folder
 - **Mermaid diagrams** and **math** (`$inline$`, `$$display$$` and ` ```math ` blocks) via bundled Mermaid and KaTeX. Both work offline.
 - **File tree** on the left. It opens at the file's folder. Click a folder to expand it, double-click it (or use a breadcrumb) to make it the root, and use ↑ or <kbd>Backspace</kbd> to go up a level. The 👁 button shows non-Markdown files too.
 - **Source pane** on the right (<kbd>Ctrl/Cmd+E</kbd>). It shows the raw Markdown with line numbers and highlighting, and scrolls in sync with the preview.
+- **Basic editing.** Click **Edit** to unlock the file. The source pane becomes a plain text editor, and the preview updates as you type. Nothing is written until you click **Save** (<kbd>Ctrl/Cmd+S</kbd>). Until then an amber *Unsaved* marker, a banner over the preview and a dot in the window title show that the preview isn't what's on disk. Locking, switching files or closing with unsaved changes asks whether to save or discard them.
 - **Live reload.** When you save the file in your editor, the preview refreshes and keeps your scroll position.
 - Light and dark themes (follows the OS; toggle with <kbd>Ctrl/Cmd+L</kbd>), zoom, find-in-page, back/forward history, and drag-and-drop to open a file.
 - Relative links to other `.md` files open inside mdview. Web links open in your browser. Local images load as you'd expect.
@@ -68,6 +69,7 @@ By default `mdview` hands the terminal back straight away, like `code`. Pass `--
 | <kbd>Ctrl+B</kbd> | Toggle file tree |
 | <kbd>Ctrl+E</kbd> | Toggle source pane |
 | <kbd>Ctrl+F</kbd> | Find in document |
+| <kbd>Ctrl+S</kbd> | Save (while editing) |
 | <kbd>Ctrl+L</kbd> | Toggle light / dark |
 | <kbd>Ctrl+R</kbd> | Reload |
 | <kbd>Ctrl+=</kbd> / <kbd>Ctrl+-</kbd> / <kbd>Ctrl+0</kbd> | Zoom in / out / reset |
