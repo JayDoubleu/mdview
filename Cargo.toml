@@ -14,7 +14,7 @@ exclude = ["/.github", "/docs"]
 [dependencies]
 ammonia = "4"
 comrak = { version = "0.56", default-features = false, features = ["syntect-fancy", "shortcodes"] }
-dirs = "6"
+dirs = "7"
 dunce = "1"
 notify = "8"
 open = "5"
