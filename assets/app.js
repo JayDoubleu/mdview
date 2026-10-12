@@ -747,6 +747,17 @@
     }, 120);
   }
 
+  // Another `mdview` launch handed us a path (see src/instance.rs). Opening a
+  // file asks first if there are unsaved edits, as switching files always does.
+  async function openLaunch({ root, file, dir, error }) {
+    if (error) return showToast(error);
+    // Mid-question (unsaved changes): don't stack another one on top.
+    if (!$("#modal").hidden || !$("#annotate").hidden) return;
+    // Already showing it: nothing to switch, so nothing to ask about.
+    if (file && !samePath(file, S.file) && !(await openFile(file))) return;
+    if (dir && !samePath(root, S.root)) setRoot(root);
+  }
+
   async function openPath(path) {
     const r = await api("resolve", { base: S.root, rel: path });
     if (r.kind === "md") openFile(r.path);
@@ -1551,7 +1562,7 @@
     }
   });
 
-  window.mdview = { fsChanged, openPath, reply, requestClose };
+  window.mdview = { fsChanged, openLaunch, openPath, reply, requestClose };
 
   // ---------- keyboard ----------
   window.addEventListener("keydown", (e) => {
@@ -1646,5 +1657,6 @@
       else showState("No file open", "Pick a Markdown file from the tree on the left.");
     }
   }
-  init();
+  // Paths from other launches are held back until the first file is shown.
+  init().finally(() => ipc("ready"));
 })();

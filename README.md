@@ -1,4 +1,4 @@
-# mdview
+# <img src="icons/mdview-128.png" width="36" alt=""> mdview
 
 A small, fast Markdown viewer for macOS, Windows and Linux. You open it from the terminal the same way you'd use `code`:
 
@@ -89,12 +89,16 @@ Or clone the repo and run `cargo install --locked --path .`. Either way the bina
 ```
 mdview [PATH]
 
+  -n, --new-window Open a new window instead of using the one already open
   -w, --wait       Keep the terminal attached until the window is closed
+                   (always opens a new window)
   -h, --help       Print help
   -V, --version    Print version
 ```
 
-By default `mdview` hands the terminal back straight away, like `code`. Pass `--wait` if you want it to block.
+Like `code`, mdview uses one window. Running `mdview other.md` while it's open shows that file in the open window and brings it to the front. If you have unsaved edits there, it asks first. `mdview some/folder` switches the window's file tree to that folder. Pass `--new-window` for a separate window.
+
+`mdview` hands the terminal back straight away. Pass `--wait` if you want it to block until the window closes.
 
 | Shortcut (Cmd on macOS) | Action |
 |---|---|
@@ -110,6 +114,8 @@ By default `mdview` hands the terminal back straight away, like `code`. Pass `--
 | <kbd>Ctrl+W</kbd> / <kbd>Ctrl+Q</kbd> | Close |
 
 On Linux, mdview turns off WebKitGTK's animated wheel scrolling because it feels laggy. Set `MDVIEW_SMOOTH_SCROLL=1` to bring it back. On NVIDIA drivers it also sets `WEBKIT_DISABLE_DMABUF_RENDERER=1`, which avoids WebKitGTK's well-known stutter there, unless you've set that variable yourself.
+
+On Linux, mdview adds itself to your applications menu the first time it runs, so desktops (including Wayland ones, which take window icons from there) show its icon. It writes `~/.local/share/applications/mdview.desktop` and `~/.local/share/icons/hicolor/{scalable,256x256}/apps/mdview.*`, and updates them if the binary moves. Set `MDVIEW_NO_DESKTOP_ENTRY=1` to skip this, and delete those files to undo it. If you customize the entry, remove its `X-Mdview-Generated=true` line and mdview will leave it alone. Builds run from a cargo `target/` folder don't touch it.
 
 You can drag the dividers to resize the panes. mdview remembers pane sizes, theme and zoom between runs.
 

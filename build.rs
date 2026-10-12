@@ -21,6 +21,18 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 fn main() {
+    // The .exe icon on Windows. Building on Windows it must work; when
+    // cross-checking from another OS there may be no resource compiler, and
+    // the build goes on without the icon.
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        println!("cargo:rerun-if-changed=icons/mdview.rc");
+        println!("cargo:rerun-if-changed=icons/mdview.ico");
+        let result = embed_resource::compile("icons/mdview.rc", embed_resource::NONE);
+        if cfg!(windows) {
+            result.manifest_required().expect("embedding the app icon");
+        }
+    }
+
     let root = Path::new(&env::var("CARGO_MANIFEST_DIR").unwrap()).join("assets");
     println!("cargo:rerun-if-changed=assets");
 
