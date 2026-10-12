@@ -115,7 +115,7 @@ Like `code`, mdview uses one window. Running `mdview other.md` while it's open s
 
 On Linux, mdview turns off WebKitGTK's animated wheel scrolling because it feels laggy. Set `MDVIEW_SMOOTH_SCROLL=1` to bring it back. On NVIDIA drivers it also sets `WEBKIT_DISABLE_DMABUF_RENDERER=1`, which avoids WebKitGTK's well-known stutter there, unless you've set that variable yourself.
 
-On Linux, mdview adds itself to your applications menu the first time it runs, so desktops (including Wayland ones, which take window icons from there) show its icon. It writes `~/.local/share/applications/mdview.desktop` and `~/.local/share/icons/hicolor/{scalable,256x256}/apps/mdview.*`, and updates them if the binary moves. Set `MDVIEW_NO_DESKTOP_ENTRY=1` to skip this, and delete those files to undo it.
+On Linux, mdview adds itself to your applications menu the first time it runs, so desktops (including Wayland ones, which take window icons from there) show its icon. It writes `~/.local/share/applications/mdview.desktop` and `~/.local/share/icons/hicolor/{scalable,256x256}/apps/mdview.*`, and updates them if the binary moves. Set `MDVIEW_NO_DESKTOP_ENTRY=1` to skip this, and delete those files to undo it. If you customize the entry, remove its `X-Mdview-Generated=true` line and mdview will leave it alone. Builds run from a cargo `target/` folder don't touch it.
 
 You can drag the dividers to resize the panes. mdview remembers pane sizes, theme and zoom between runs.
 

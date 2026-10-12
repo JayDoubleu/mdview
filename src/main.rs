@@ -51,6 +51,8 @@ enum UserEvent {
     Dropped(Vec<PathBuf>),
     /// Another `mdview` launch asked this window to open a path.
     Open(PathBuf),
+    /// The page finished starting up and can take `Open`s.
+    PageReady,
     /// The page has (or no longer has) unsaved edits.
     Dirty(bool),
     /// Answer to a request from the page, delivered to `mdview.reply`.
@@ -78,12 +80,15 @@ struct Args {
     target: PathBuf,
     wait: bool,
     new_window: bool,
+    /// This is the copy `detach` started in the background.
+    background: bool,
 }
 
 fn parse_args() -> Args {
     let mut path: Option<PathBuf> = None;
     let mut wait = false;
     let mut new_window = false;
+    let mut background = false;
     for arg in std::env::args_os().skip(1) {
         match arg.to_str() {
             Some("-h" | "--help") => {
@@ -98,6 +103,7 @@ fn parse_args() -> Args {
             }
             Some("-w" | "--wait") => wait = true,
             Some("-n" | "--new-window") => new_window = true,
+            Some(BACKGROUND_ARG) => background = true,
             Some(flag) if flag.starts_with('-') && flag.len() > 1 && !Path::new(flag).exists() => {
                 attach_console();
                 eprintln!("mdview: unknown option '{flag}'\n\n{USAGE}");
@@ -115,6 +121,7 @@ fn parse_args() -> Args {
         target,
         wait,
         new_window,
+        background,
     }
 }
 
@@ -157,8 +164,9 @@ fn launch_for(target: &Path) -> Launch {
     }
 }
 
-/// Set on the copy that `detach` starts in the background.
-const CHILD_ENV: &str = "MDVIEW_DETACHED";
+/// Passed to the copy that `detach` starts in the background. An argument,
+/// not an environment variable, so programs mdview opens don't inherit it.
+const BACKGROUND_ARG: &str = "--mdview-background";
 
 /// Like `code file.md`: relaunch in the background so the terminal is free again.
 /// Windows release builds are GUI apps, which shells don't wait for anyway.
@@ -166,15 +174,12 @@ const CHILD_ENV: &str = "MDVIEW_DETACHED";
 fn detach() -> bool {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
-    if std::env::var_os(CHILD_ENV).is_some() {
-        return false;
-    }
     let Ok(exe) = std::env::current_exe() else {
         return false;
     };
     Command::new(exe)
         .args(std::env::args_os().skip(1))
-        .env(CHILD_ENV, "1")
+        .arg(BACKGROUND_ARG)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -188,22 +193,36 @@ fn main() -> wry::Result<()> {
         target,
         wait,
         new_window,
+        background,
     } = parse_args();
     let launch = launch_for(&target);
     if let Some(error) = &launch.error {
-        attach_console();
-        eprintln!("mdview: {error}");
+        if !background {
+            attach_console();
+            eprintln!("mdview: {error}");
+        }
     }
     // Hand the path to the window that's already open, if there is one.
-    // (The relaunched background copy has already been through this.)
-    let handoff = !wait && !new_window && std::env::var_os(CHILD_ENV).is_none();
-    if handoff && launch.error.is_none() && instance::send(&target) {
+    let handoff = !wait && !new_window && launch.error.is_none();
+    if handoff && !background && instance::send(&target) {
         return Ok(());
     }
     #[cfg(unix)]
-    if !wait && detach() {
+    if !wait && !background && detach() {
         return Ok(());
     }
+    // Become the instance (a `--wait` window doesn't, since navigating it away
+    // would end the wait). Claimed before the window is built, so launches at
+    // the same moment end up in one window; whoever loses hands over.
+    let listener = if wait {
+        None
+    } else {
+        match instance::bind() {
+            instance::Bind::Listening(l) => Some(l),
+            instance::Bind::Running if handoff && instance::send(&target) => return Ok(()),
+            _ => None,
+        }
+    };
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     webkitgtk_env();
     let launch = Arc::new(launch);
@@ -221,10 +240,12 @@ fn main() -> wry::Result<()> {
     icon::install();
 
     // Later launches (`mdview other.md`) open here instead of in a new window.
-    let open_proxy = proxy.clone();
-    instance::listen(move |path| {
-        let _ = open_proxy.send_event(UserEvent::Open(path));
-    });
+    if let Some(listener) = listener {
+        let open_proxy = proxy.clone();
+        instance::serve(listener, move |path| {
+            open_proxy.send_event(UserEvent::Open(path)).is_ok()
+        });
+    }
 
     // Custom protocol origins differ per platform (see wry docs).
     #[cfg(any(target_os = "windows", target_os = "android"))]
@@ -298,6 +319,8 @@ fn main() -> wry::Result<()> {
     let mut watched: Vec<PathBuf> = Vec::new();
 
     let mut dirty = false;
+    let mut page_ready = false;
+    let mut pending: Vec<PathBuf> = Vec::new();
     let mut close_asked: Option<(Instant, bool)> = None;
 
     event_loop.run(move |event, _, control_flow| {
@@ -354,6 +377,14 @@ fn main() -> wry::Result<()> {
                 let paths: Vec<_> = paths.iter().map(|p| p.to_string_lossy()).collect();
                 send_js(&webview, "fsChanged", json!(paths));
             }
+            // Paths that arrive before the page is ready wait for it.
+            Event::UserEvent(UserEvent::Open(path)) if !page_ready => pending.push(path),
+            Event::UserEvent(UserEvent::PageReady) => {
+                page_ready = true;
+                for path in pending.drain(..) {
+                    let _ = proxy.send_event(UserEvent::Open(path));
+                }
+            }
             Event::UserEvent(UserEvent::Open(path)) => {
                 let l = launch_for(&path);
                 send_js(
@@ -368,7 +399,7 @@ fn main() -> wry::Result<()> {
                 );
                 window.set_minimized(false);
                 window.set_visible(true);
-                window.set_focus();
+                raise(&window);
             }
             Event::UserEvent(UserEvent::Dropped(paths)) => {
                 if let Some(p) = paths.first() {
@@ -465,6 +496,19 @@ fn macos_menu(proxy: EventLoopProxy<UserEvent>) -> muda::Menu {
     menu
 }
 
+/// Brings the window to the front. GTK's present() also un-minimizes, which
+/// tao's set_focus skips while the window is still minimized.
+fn raise(window: &tao::window::Window) {
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        use gtk::prelude::GtkWindowExt;
+        use tao::platform::unix::WindowExtUnix;
+        window.gtk_window().present();
+    }
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    window.set_focus();
+}
+
 fn send_js(webview: &wry::WebView, func: &str, arg: Value) {
     let _ = webview.evaluate_script(&format!("window.mdview && window.mdview.{func}({arg})"));
 }
@@ -507,6 +551,9 @@ fn handle_ipc(proxy: &EventLoopProxy<UserEvent>, body: &str) {
         }
         Some("close") => {
             let _ = proxy.send_event(UserEvent::CloseRequested);
+        }
+        Some("ready") => {
+            let _ = proxy.send_event(UserEvent::PageReady);
         }
         Some("close_ack") => {
             let _ = proxy.send_event(UserEvent::CloseAck);

@@ -45,7 +45,8 @@ fn dock_icon() {
 /// Writes `mdview.desktop` and the icon into the user's data folder (once, and
 /// again if the binary moves). GTK uses the program name as the Wayland app id,
 /// so the entry's name is what links the window to its icon. Set
-/// MDVIEW_NO_DESKTOP_ENTRY=1 to skip this.
+/// MDVIEW_NO_DESKTOP_ENTRY=1 to skip this. An entry without our marker line
+/// (written by the user or a package) is left alone, as are dev builds.
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn desktop_entry() {
     use std::fs;
@@ -55,28 +56,43 @@ fn desktop_entry() {
     let (Some(data), Ok(exe)) = (dirs::data_dir(), std::env::current_exe()) else {
         return;
     };
-    // Desktop-entry Exec quoting: wrap in quotes, escape " ` $ \.
-    let mut quoted = String::from("\"");
-    for c in exe.to_string_lossy().chars() {
-        if matches!(c, '"' | '`' | '$' | '\\') {
-            quoted.push('\\');
-        }
-        quoted.push(c);
+    // Leave dev builds out of the menu: `cargo run` binaries live in
+    // target/debug or target/release (possibly under a target triple).
+    let name = |p: &std::path::Path| p.file_name().and_then(|n| n.to_str()).map(str::to_owned);
+    let built = exe
+        .parent()
+        .and_then(name)
+        .is_some_and(|n| n == "debug" || n == "release");
+    if built
+        && exe
+            .ancestors()
+            .skip(2)
+            .take(2)
+            .any(|p| name(p).as_deref() == Some("target"))
+    {
+        return;
     }
-    quoted.push('"');
+    let Some(exec) = exec_value(&exe.to_string_lossy()).filter(|_| exe.to_str().is_some()) else {
+        return;
+    };
     let entry = format!(
         "[Desktop Entry]\n\
          Type=Application\n\
          Name=mdview\n\
          GenericName=Markdown Viewer\n\
          Comment=View and edit Markdown files\n\
-         Exec={quoted} %f\n\
+         Exec={exec} %f\n\
          Icon=mdview\n\
          Terminal=false\n\
          Categories=Utility;TextEditor;\n\
          MimeType=text/markdown;text/x-markdown;\n\
-         StartupWMClass=mdview\n"
+         StartupWMClass=mdview\n\
+         {MARKER}\n"
     );
+    let desktop = data.join("applications/mdview.desktop");
+    if fs::read_to_string(&desktop).is_ok_and(|old| !old.contains(MARKER)) {
+        return;
+    }
     let files: [(&str, &[u8]); 3] = [
         (
             "icons/hicolor/scalable/apps/mdview.svg",
@@ -95,5 +111,46 @@ fn desktop_entry() {
         }
         let _ = path.parent().map(fs::create_dir_all);
         let _ = fs::write(&path, bytes);
+    }
+}
+
+/// Marks the desktop entry as mdview's own, safe to update.
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+const MARKER: &str = "X-Mdview-Generated=true";
+
+/// The program part of a desktop entry's Exec key, or None if the path can't be
+/// written there reliably. The spec has two layers: inside the quotes, " ` $ \
+/// get a backslash; then the whole value is a string whose backslashes are
+/// doubled. A % would be read as a field code (and GLib rejects %% in the
+/// program name), so such paths are skipped.
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn exec_value(path: &str) -> Option<String> {
+    if path.contains(['%', '\n', '\r']) {
+        return None;
+    }
+    let mut quoted = String::from("\"");
+    for c in path.chars() {
+        if matches!(c, '"' | '`' | '$' | '\\') {
+            quoted.push('\\');
+        }
+        quoted.push(c);
+    }
+    quoted.push('"');
+    Some(quoted.replace('\\', "\\\\"))
+}
+
+#[cfg(all(test, not(any(target_os = "windows", target_os = "macos"))))]
+mod tests {
+    use super::exec_value;
+
+    #[test]
+    fn exec_quoting_follows_the_spec() {
+        assert_eq!(
+            exec_value("/usr/bin/mdview").unwrap(),
+            r#""/usr/bin/mdview""#
+        );
+        assert_eq!(exec_value("/a b/$x\"y").unwrap(), r#""/a b/\\$x\\"y""#);
+        assert_eq!(exec_value(r"/a\b").unwrap(), r#""/a\\\\b""#);
+        assert_eq!(exec_value("/100%/mdview"), None);
     }
 }

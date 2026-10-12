@@ -751,7 +751,10 @@
   // file asks first if there are unsaved edits, as switching files always does.
   async function openLaunch({ root, file, dir, error }) {
     if (error) return showToast(error);
-    if (file && !(await openFile(file))) return;
+    // Mid-question (unsaved changes): don't stack another one on top.
+    if (!$("#modal").hidden || !$("#annotate").hidden) return;
+    // Already showing it: nothing to switch, so nothing to ask about.
+    if (file && !samePath(file, S.file) && !(await openFile(file))) return;
     if (dir && !samePath(root, S.root)) setRoot(root);
   }
 
@@ -1654,5 +1657,6 @@
       else showState("No file open", "Pick a Markdown file from the tree on the left.");
     }
   }
-  init();
+  // Paths from other launches are held back until the first file is shown.
+  init().finally(() => ipc("ready"));
 })();
