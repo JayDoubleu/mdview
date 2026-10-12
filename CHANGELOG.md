@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
 - One window, like `code`: running `mdview other.md` while mdview is open shows the file in that window (asking first if there are unsaved edits) and brings it to the front; a folder switches its file tree. `-n`/`--new-window` opens a separate window, and `--wait` always does.
 - An app icon: on the window and taskbar, the Windows .exe, and the macOS Dock. On Linux mdview installs a desktop entry and icon in your user folders on first run, which Wayland desktops need to show it (set `MDVIEW_NO_DESKTOP_ENTRY=1` to skip).
