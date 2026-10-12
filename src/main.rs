@@ -5,6 +5,8 @@
 )]
 
 mod annotations;
+mod icon;
+mod instance;
 mod render;
 mod server;
 mod text;
@@ -30,7 +32,9 @@ ARGS:
     PATH    Markdown file or directory to open (defaults to the current directory)
 
 OPTIONS:
+    -n, --new-window Open a new window instead of using the one already open
     -w, --wait       Keep the terminal attached until the window is closed
+                     (always opens a new window)
     -h, --help       Print help
     -V, --version    Print version
 
@@ -45,6 +49,8 @@ enum UserEvent {
     Watch(Vec<PathBuf>),
     FsChanged(Vec<PathBuf>),
     Dropped(Vec<PathBuf>),
+    /// Another `mdview` launch asked this window to open a path.
+    Open(PathBuf),
     /// The page has (or no longer has) unsaved edits.
     Dirty(bool),
     /// Answer to a request from the page, delivered to `mdview.reply`.
@@ -67,9 +73,17 @@ fn attach_console() {
     }
 }
 
-fn parse_args() -> (Launch, bool) {
+struct Args {
+    /// Absolute path to open (file or folder).
+    target: PathBuf,
+    wait: bool,
+    new_window: bool,
+}
+
+fn parse_args() -> Args {
     let mut path: Option<PathBuf> = None;
     let mut wait = false;
+    let mut new_window = false;
     for arg in std::env::args_os().skip(1) {
         match arg.to_str() {
             Some("-h" | "--help") => {
@@ -83,6 +97,7 @@ fn parse_args() -> (Launch, bool) {
                 std::process::exit(0);
             }
             Some("-w" | "--wait") => wait = true,
+            Some("-n" | "--new-window") => new_window = true,
             Some(flag) if flag.starts_with('-') && flag.len() > 1 && !Path::new(flag).exists() => {
                 attach_console();
                 eprintln!("mdview: unknown option '{flag}'\n\n{USAGE}");
@@ -95,53 +110,55 @@ fn parse_args() -> (Launch, bool) {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let target = path
         .map(|p| if p.is_absolute() { p } else { cwd.join(p) })
-        .unwrap_or(cwd.clone());
-    let canon = |p: &Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        .unwrap_or(cwd);
+    Args {
+        target,
+        wait,
+        new_window,
+    }
+}
 
+/// What to show for `target`: a file and its folder, or a folder and its README.
+fn launch_for(target: &Path) -> Launch {
+    let canon = |p: &Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     if target.is_dir() {
-        let root = canon(&target);
+        let root = canon(target);
         let file = ["README.md", "readme.md", "Readme.md", "index.md"]
             .iter()
             .map(|n| root.join(n))
             .find(|p| p.is_file());
-        (
-            Launch {
-                root,
-                file,
-                error: None,
-            },
-            wait,
-        )
+        Launch {
+            root,
+            file,
+            error: None,
+        }
     } else if target.is_file() {
-        let file = canon(&target);
-        let root = file.parent().map(Path::to_path_buf).unwrap_or(cwd);
-        (
-            Launch {
-                root,
-                file: Some(file),
-                error: None,
-            },
-            wait,
-        )
+        let file = canon(target);
+        let root = file
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| file.clone());
+        Launch {
+            root,
+            file: Some(file),
+            error: None,
+        }
     } else {
         let root = target
             .parent()
             .filter(|p| p.is_dir())
             .map(canon)
-            .unwrap_or_else(|| canon(&cwd));
-        let error = Some(format!("File not found: {}", target.display()));
-        attach_console();
-        eprintln!("mdview: {}", error.as_deref().unwrap());
-        (
-            Launch {
-                root,
-                file: None,
-                error,
-            },
-            wait,
-        )
+            .unwrap_or_else(|| canon(Path::new(".")));
+        Launch {
+            root,
+            file: None,
+            error: Some(format!("File not found: {}", target.display())),
+        }
     }
 }
+
+/// Set on the copy that `detach` starts in the background.
+const CHILD_ENV: &str = "MDVIEW_DETACHED";
 
 /// Like `code file.md`: relaunch in the background so the terminal is free again.
 /// Windows release builds are GUI apps, which shells don't wait for anyway.
@@ -149,7 +166,6 @@ fn parse_args() -> (Launch, bool) {
 fn detach() -> bool {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
-    const CHILD_ENV: &str = "MDVIEW_DETACHED";
     if std::env::var_os(CHILD_ENV).is_some() {
         return false;
     }
@@ -168,13 +184,26 @@ fn detach() -> bool {
 }
 
 fn main() -> wry::Result<()> {
-    let (launch, wait) = parse_args();
+    let Args {
+        target,
+        wait,
+        new_window,
+    } = parse_args();
+    let launch = launch_for(&target);
+    if let Some(error) = &launch.error {
+        attach_console();
+        eprintln!("mdview: {error}");
+    }
+    // Hand the path to the window that's already open, if there is one.
+    // (The relaunched background copy has already been through this.)
+    let handoff = !wait && !new_window && std::env::var_os(CHILD_ENV).is_none();
+    if handoff && launch.error.is_none() && instance::send(&target) {
+        return Ok(());
+    }
     #[cfg(unix)]
     if !wait && detach() {
         return Ok(());
     }
-    #[cfg(not(unix))]
-    let _ = wait;
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     webkitgtk_env();
     let launch = Arc::new(launch);
@@ -186,8 +215,16 @@ fn main() -> wry::Result<()> {
         .with_title("mdview")
         .with_inner_size(LogicalSize::new(1280.0, 860.0))
         .with_min_inner_size(LogicalSize::new(480.0, 320.0))
+        .with_window_icon(icon::window_icon())
         .build(&event_loop)
         .expect("failed to create window");
+    icon::install();
+
+    // Later launches (`mdview other.md`) open here instead of in a new window.
+    let open_proxy = proxy.clone();
+    instance::listen(move |path| {
+        let _ = open_proxy.send_event(UserEvent::Open(path));
+    });
 
     // Custom protocol origins differ per platform (see wry docs).
     #[cfg(any(target_os = "windows", target_os = "android"))]
@@ -316,6 +353,22 @@ fn main() -> wry::Result<()> {
             Event::UserEvent(UserEvent::FsChanged(paths)) => {
                 let paths: Vec<_> = paths.iter().map(|p| p.to_string_lossy()).collect();
                 send_js(&webview, "fsChanged", json!(paths));
+            }
+            Event::UserEvent(UserEvent::Open(path)) => {
+                let l = launch_for(&path);
+                send_js(
+                    &webview,
+                    "openLaunch",
+                    json!({
+                        "root": l.root.to_string_lossy(),
+                        "file": l.file.map(|f| f.to_string_lossy().into_owned()),
+                        "dir": path.is_dir(),
+                        "error": l.error,
+                    }),
+                );
+                window.set_minimized(false);
+                window.set_visible(true);
+                window.set_focus();
             }
             Event::UserEvent(UserEvent::Dropped(paths)) => {
                 if let Some(p) = paths.first() {

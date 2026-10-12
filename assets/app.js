@@ -747,6 +747,14 @@
     }, 120);
   }
 
+  // Another `mdview` launch handed us a path (see src/instance.rs). Opening a
+  // file asks first if there are unsaved edits, as switching files always does.
+  async function openLaunch({ root, file, dir, error }) {
+    if (error) return showToast(error);
+    if (file && !(await openFile(file))) return;
+    if (dir && !samePath(root, S.root)) setRoot(root);
+  }
+
   async function openPath(path) {
     const r = await api("resolve", { base: S.root, rel: path });
     if (r.kind === "md") openFile(r.path);
@@ -1551,7 +1559,7 @@
     }
   });
 
-  window.mdview = { fsChanged, openPath, reply, requestClose };
+  window.mdview = { fsChanged, openLaunch, openPath, reply, requestClose };
 
   // ---------- keyboard ----------
   window.addEventListener("keydown", (e) => {
