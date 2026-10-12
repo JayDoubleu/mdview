@@ -24,6 +24,16 @@ mdview                # browse the current folder
 - Relative links to other `.md` files open inside mdview. Web links open in your browser. Local images load as you'd expect.
 - About 10 MB as a single binary. It uses the system webview (WebView2, WKWebView or WebKitGTK), so nothing like Electron gets bundled.
 
+## Screenshots
+
+**Editing.** The source pane turns into an editor and the preview follows as you type. Until you save, the toolbar, a banner over the preview and the window title show that there are unsaved changes. The cursor line is highlighted in both panes.
+
+![Editing with unsaved changes](docs/editing.png)
+
+**Dark theme and two-way selection.** Text selected in the preview is highlighted in the source pane, and the other way round.
+
+![Dark theme with a selection mirrored in the source pane](docs/dark-theme.png)
+
 ## Annotations
 
 Annotations let you mark up a document for someone else to act on, typically an AI coding agent. Each note is stored as an HTML comment just above the block it refers to. GitHub and other Markdown viewers hide it, while anything that reads the file sees it plainly:
@@ -42,6 +52,8 @@ A selection over several lines is quoted with `> ` lines. To hand the notes to a
 > Find the annotations in docs/plan.md with `grep -n "<!-- ANNOTATION" docs/plan.md`, read only the lines around each one, apply each note to the selected text, then delete the comment. Work from the bottom of the file up so line numbers stay valid.
 
 On a long document this saves the agent from reading the whole file. Resolving a note is just deleting its comment, so nothing else needs to be kept in sync.
+
+![A note card in the preview and the Annotate menu on a selection](docs/annotations.png)
 
 ## Install
 
